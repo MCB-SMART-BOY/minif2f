@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ── Model registry: name → gguf path ──────────────────────────────
+declare -A MODELS
+MODELS["kimina-prover-rl-1.7b"]="models/kimina-1.7b.gguf"
+MODELS["goedel-prover-dpo"]="models/goedel-prover-dpo.gguf"
+MODELS["goedel-prover-v2-8b"]="models/goedel-prover-v2-8b.gguf"
+MODELS["deepseek-prover-v2-7b"]="models/deepseek-prover-v2-7b.gguf"
+MODELS["kimina-prover-distill-8b"]="models/kimina-prover-distill-8b.gguf"
+MODELS["stp-model-lean"]="models/stp-model-lean.gguf"
+
+# ── Helpers ─────────────────────────────────────────────────────────
+banner() {
+    echo ""
+    echo -e "${BOLD}╔══════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}║       minif2f — Proof Generator      ║${NC}"
+    echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+choose() {
+    local prompt="$1"; shift
+    local options=("$@")
+    # Write menu to stderr so stdout capture ($(...)) only gets the result
+    echo -e "${CYAN}${prompt}${NC}" >&2
+    for i in "${!options[@]}"; do
+        printf "  ${BOLD}%d)${NC} %s\n" "$((i + 1))" "${options[$i]}" >&2
+    done
+    echo "" >&2
+    while true; do
+        read -r -p "  Choose [1-${#options[@]}]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#options[@]})); then
+            echo "$((choice - 1))"
+            return
+        fi
+    done
+}
+
+confirm() {
+    local msg="$1"
+    echo ""
+    echo -e "${YELLOW}${msg}${NC}"
+    read -r -p "  Continue? [Y/n]: " ans
+    [[ -z "$ans" || "$ans" =~ ^[Yy] ]]
+}
+
+# ── Actions ─────────────────────────────────────────────────────────
+do_list_models() {
+    echo ""
+    echo -e "${BOLD}Available models:${NC}"
+    echo ""
+    for name in "${!MODELS[@]}"; do
+        local gguf="${MODELS[$name]}"
+        if [[ -f "$gguf" ]]; then
+            echo -e "  ${GREEN}✅${NC} ${name}"
+            echo -e "     GGUF: ${gguf} ($(du -h "$gguf" | cut -f1))"
+        else
+            echo -e "  ${RED}❌${NC} ${name} — GGUF not found (needs conversion)"
+        fi
+        echo ""
+    done
+}
+
+do_status() {
+    echo ""
+    echo -e "${BOLD}Checkpoint status:${NC}"
+    echo ""
+    local found=0
+    shopt -s nullglob
+    for f in results/checkpoints/*.json; do
+        [[ -f "$f" ]] || continue
+        found=1
+        local name
+        name=$(basename "$f" .json)
+        local content count
+        content=$(<"$f")
+        if [[ "$content" == "[]" ]]; then
+            count=0
+        else
+            # JSON array of strings: count commas + 1
+            count=$(tr -dc ',' <<<"$content" | wc -c)
+            count=$((count + 1))
+        fi
+        echo -e "  ${GREEN}●${NC} ${name}: ${count} done"
+    done
+    shopt -u nullglob
+    if ((found == 0)); then
+        echo "  No checkpoints yet."
+    fi
+    echo ""
+}
+
+do_quality() {
+    echo ""
+    echo -e "${BOLD}Running quality gates...${NC}"
+    echo ""
+
+    local tmp
+    tmp=$(mktemp)
+
+    echo -n "  cargo fmt --check ... "
+    if cargo fmt --check &>"$tmp"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        echo "    ---"
+        sed 's/^/    /' "$tmp"
+        echo "    ---"
+        cargo fmt
+        rm -f "$tmp"
+        echo "  (auto-formatted, please re-run)"
+        return 1
+    fi
+
+    echo -n "  cargo clippy ... "
+    if cargo clippy -- -D warnings &>"$tmp"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        echo "    ---"
+        tail -10 "$tmp" | sed 's/^/    /'
+        echo "    ---"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    echo -n "  cargo test ... "
+    if cargo test &>"$tmp"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        echo "    ---"
+        tail -10 "$tmp" | sed 's/^/    /'
+        echo "    ---"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    rm -f "$tmp"
+
+    echo ""
+    echo -e "  ${GREEN}${BOLD}All gates passed ✅${NC}"
+    echo ""
+}
+
+do_build() {
+    echo ""
+    echo -e "${BOLD}Building...${NC}"
+    cargo build
+    echo ""
+    echo -e "  ${GREEN}${BOLD}Build complete ✅${NC}"
+    echo ""
+}
+
+do_generate() {
+    # ── Pick model ──────────────────────────────────────────────────
+    # Build parallel arrays: display_names + keys (stable order)
+    local display_names=()
+    local model_keys=()
+    for name in "${!MODELS[@]}"; do
+        model_keys+=("$name")
+        if [[ -f "${MODELS[$name]}" ]]; then
+            display_names+=("$name")
+        else
+            display_names+=("$name (GGUF missing — needs conversion)")
+        fi
+    done
+
+    local idx
+    idx=$(choose "Select model:" "${display_names[@]}")
+    local model_name="${model_keys[$idx]}"
+    local gguf="${MODELS[$model_name]}"
+
+    if [[ ! -f "$gguf" ]]; then
+        echo ""
+        echo -e "${RED}GGUF file not found: ${gguf}${NC}"
+        echo "Run model conversion first (see .claude/skills/convert-model.md)"
+        return 1
+    fi
+
+    # ── Run ID ──────────────────────────────────────────────────────
+    local run_id
+    run_id="$(date +%Y%m%d-%H%M%S)"
+    echo ""
+    echo -e "  Run ID: ${BOLD}${run_id}${NC} (auto-generated)"
+
+    # ── Confirm ─────────────────────────────────────────────────────
+    echo ""
+    echo -e "  ${BOLD}Summary:${NC}"
+    echo -e "    Model:     ${CYAN}${model_name}${NC}"
+    echo -e "    GGUF:      ${gguf}"
+    echo -e "    Theorems:  488"
+    echo -e "    Run ID:    ${run_id}"
+    echo -e "    Output:    output/${model_name}.json"
+
+    if ! confirm "Start generation?"; then
+        echo "  Canceled."
+        return 0
+    fi
+
+    # ── Run ─────────────────────────────────────────────────────────
+    echo ""
+    echo -e "${GREEN}${BOLD}Starting generation...${NC}"
+    echo ""
+    cargo run -- generate \
+        -m "$model_name" \
+        -p "$gguf" \
+        --run-id "$run_id"
+
+    echo ""
+    echo -e "  Output:   ${BOLD}output/${model_name}.json${NC}"
+    echo -e "  Status:   ${BOLD}cargo run -- status --run-id ${run_id}${NC}"
+}
+
+# ── Main ────────────────────────────────────────────────────────────
+main() {
+    # Must run interactively
+    if [[ ! -t 0 ]]; then
+        echo "ERROR: ./run must be run interactively (no pipes or redirects)."
+        echo "Use: cargo run --release -- generate -m <model> -p <gguf>"
+        exit 1
+    fi
+
+    banner
+
+    local actions=(
+        "Generate Proofs"
+        "Check Status"
+        "List Models"
+        "Quality Gates (fmt + clippy + test)"
+        "Build Project"
+    )
+
+    local idx
+    idx=$(choose "What do you want to do?" "${actions[@]}")
+
+    case "$idx" in
+        0) do_generate ;;
+        1) do_status ;;
+        2) do_list_models ;;
+        3) do_quality ;;
+        4) do_build ;;
+    esac
+}
+
+main

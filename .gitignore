@@ -1,0 +1,23 @@
+# Rust
+/target
+
+# Models (too large for git — download/convert on each machine)
+models/
+
+# Outputs
+output/
+results/
+reports/
+data/
+
+# Tools (set up by setup.sh)
+tools/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# AI
+.claude
+CLAUDE.md
