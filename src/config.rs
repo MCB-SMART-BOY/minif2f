@@ -24,6 +24,7 @@ pub struct ModelConfig {
 pub struct PipelineConfig {
     pub project_root: PathBuf,
     pub llama_server_binary: String,
+    pub port: u16,
 }
 
 impl Default for PipelineConfig {
@@ -31,6 +32,7 @@ impl Default for PipelineConfig {
         Self {
             project_root: PathBuf::from("."),
             llama_server_binary: "llama-server".into(),
+            port: 8080,
         }
     }
 }

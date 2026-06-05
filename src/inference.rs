@@ -41,6 +41,8 @@ impl InferenceEngine {
                 "--parallel",
                 "2",
                 "--no-warmup",
+                "--api-key",
+                "minif2f",
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(format!(
@@ -53,7 +55,10 @@ impl InferenceEngine {
 
         let engine = Self {
             config,
-            client: Client::builder().timeout(Duration::from_mins(5)).build()?,
+            client: Client::builder()
+                .timeout(Duration::from_mins(5))
+                .no_proxy()
+                .build()?,
             server: child,
             base_url: base_url.clone(),
         };
@@ -71,7 +76,13 @@ impl InferenceEngine {
                     timeout.as_secs()
                 );
             }
-            match engine.client.get(&health_url).send().await {
+            match engine
+                .client
+                .get(&health_url)
+                .header("Authorization", "Bearer minif2f")
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => break,
                 Ok(resp) if resp.status().as_u16() == 503 => {
                     // Model is loading — keep waiting
@@ -94,7 +105,13 @@ impl InferenceEngine {
         max_retries: usize,
     ) -> String {
         for attempt in 0..=max_retries {
-            match client.post(url).json(&body).send().await {
+            match client
+                .post(url)
+                .header("Authorization", "Bearer minif2f")
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(resp) => match resp.json::<Value>().await {
                     Ok(json) => {
                         return json["content"].as_str().unwrap_or("").to_string();

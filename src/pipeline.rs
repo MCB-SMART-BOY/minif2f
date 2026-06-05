@@ -43,8 +43,13 @@ impl EvaluationPipeline {
             .llama_server_path()
             .to_string_lossy()
             .to_string();
-        let engine =
-            InferenceEngine::start(model_cfg.clone(), model_path, 8080, &llama_server_bin).await?;
+        let engine = InferenceEngine::start(
+            model_cfg.clone(),
+            model_path,
+            self.config.port,
+            &llama_server_bin,
+        )
+        .await?;
         println!("   ✅ llama-server ready");
 
         // ── Generate ────────────────────────────────────────────────────

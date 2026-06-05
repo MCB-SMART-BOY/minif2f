@@ -29,6 +29,9 @@ enum Commands {
         /// Run ID for checkpointing
         #[arg(long, default_value = "default")]
         run_id: String,
+        /// Port for llama-server (use different ports for parallel runs)
+        #[arg(long, default_value = "8080")]
+        port: u16,
     },
     /// Generate report from existing results (not yet implemented)
     Report {
@@ -62,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
             model,
             model_path,
             run_id,
+            port,
         } => {
             let model_cfg = find_model(&model).ok_or_else(|| {
                 anyhow::anyhow!("Model '{model}' not found. Use 'list-models' to see available.")
@@ -69,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
 
             let config = PipelineConfig {
                 project_root: PathBuf::from("."),
+                port,
                 ..PipelineConfig::default()
             };
 
@@ -76,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Model: {} ({})", model_cfg.name, model_cfg.hf_repo);
             println!("Model path: {model_path}");
             println!("Architecture: {}", model_cfg.architecture);
+            println!("Port: {port}");
 
             let pipeline = EvaluationPipeline::new(config, &run_id);
             pipeline.run(&model_cfg, &model_path).await?;

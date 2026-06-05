@@ -58,7 +58,11 @@ do_list_models() {
     echo ""
     echo -e "${BOLD}Available models:${NC}"
     echo ""
-    for name in "${!MODELS[@]}"; do
+    # Sort keys for stable output
+    local names=()
+    for name in "${!MODELS[@]}"; do names+=("$name"); done
+    IFS=$'\n' names=($(sort <<<"${names[*]}")); unset IFS
+    for name in "${names[@]}"; do
         local gguf="${MODELS[$name]}"
         if [[ -f "$gguf" ]]; then
             echo -e "  ${GREEN}✅${NC} ${name}"
@@ -79,9 +83,16 @@ do_status() {
     for f in results/checkpoints/*.json; do
         [[ -f "$f" ]] || continue
         found=1
-        local name
-        name=$(basename "$f" .json)
-        local content count
+        local filename model run_id content count
+        filename=$(basename "$f" .json)
+        # Parse model name from "<model>__<run_id>.json" format
+        if [[ "$filename" =~ ^(.+)__(.+)$ ]]; then
+            model="${BASH_REMATCH[1]}"
+            run_id="${BASH_REMATCH[2]}"
+        else
+            model="$filename"
+            run_id="?"
+        fi
         content=$(<"$f")
         if [[ "$content" == "[]" ]]; then
             count=0
@@ -90,7 +101,7 @@ do_status() {
             count=$(tr -dc ',' <<<"$content" | wc -c)
             count=$((count + 1))
         fi
-        echo -e "  ${GREEN}●${NC} ${name}: ${count} done"
+        echo -e "  ${GREEN}●${NC} ${model} [${run_id}]: ${count} done"
     done
     shopt -u nullglob
     if ((found == 0)); then
@@ -163,10 +174,13 @@ do_build() {
 
 do_generate() {
     # ── Pick model ──────────────────────────────────────────────────
-    # Build parallel arrays: display_names + keys (stable order)
+    # Build sorted parallel arrays: display_names + keys
     local display_names=()
     local model_keys=()
-    for name in "${!MODELS[@]}"; do
+    local names=()
+    for name in "${!MODELS[@]}"; do names+=("$name"); done
+    IFS=$'\n' names=($(sort <<<"${names[*]}")); unset IFS
+    for name in "${names[@]}"; do
         model_keys+=("$name")
         if [[ -f "${MODELS[$name]}" ]]; then
             display_names+=("$name")
