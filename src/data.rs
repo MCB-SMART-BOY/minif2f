@@ -83,10 +83,23 @@ pub fn load_split(data_dir: &Path, split: &str) -> Result<Vec<Theorem>> {
 /// Returns an error if neither split has a readable dataset.
 pub fn load_all(data_dir: &Path) -> Result<Vec<Theorem>> {
     let mut all = Vec::new();
+    let mut errors = Vec::new();
     for split in &["test", "valid"] {
-        if let Ok(t) = load_split(data_dir, split) {
-            all.extend(t);
+        match load_split(data_dir, split) {
+            Ok(t) => all.extend(t),
+            Err(e) => errors.push(e),
         }
+    }
+    if all.is_empty() && !errors.is_empty() {
+        anyhow::bail!(
+            "Failed to load any theorems from {}: {}",
+            data_dir.display(),
+            errors
+                .iter()
+                .map(|e| format!("{e}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
     Ok(all)
 }

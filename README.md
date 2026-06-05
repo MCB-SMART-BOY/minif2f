@@ -91,16 +91,19 @@ output/<model>.json
 
 | Model | Architecture | Chat Template | Prompt | ctx | Status |
 |-------|-------------|---------------|--------|-----|--------|
-| kimina-prover-rl-1.7b | Qwen3 | ChatML + nothink | kimina | 8192 | ✅ |
-| goedel-prover-v2-8b | Qwen3 | ChatML + nothink | goedel_v2 | 8192 | ✅ |
+| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 8192 | ✅ |
+| goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 8192 | ✅ |
 | deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 8192 | ✅ |
-| kimina-prover-distill-8b | Qwen3 | ChatML + nothink | kimina | 8192 | ✅ |
+| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 8192 | ✅ |
 | goedel-prover-dpo | DeepSeek Coder | ### | simple | 4096 | ✅ |
 | stp-model-lean | DeepSeek Coder | ### | simple | 2048 | ✅ |
 
 ## Design
 
-- **Disable thinking**: Qwen ChatML injects empty `<think>\n\n</think>\n\n` block (`enable_thinking=false`)
+- **Deep thinking (Qwen3 models)**: Model generates `<think>reasoning</think>` naturally (RL-trained format reward). Empty think block breaks the model — removed after audit discovered 57.6% duplicate outputs.
+- **`sorry` placeholder**: Goedel-V2 and Simple formats include `sorry` in theorem statement, matching official HF prompt format.
+- **Proof extraction**: Multi-strategy with validation — rejects header-only code blocks, strips markdown commentary.
+- **Checkpoint resume**: Loads existing output JSON on startup, preserves prior results. No data loss on restart.
 - **Context**: 8192 for most models (HF official specs), 4096/2048 for DeepSeek Coder models
 - **Output**: Nested JSON `{model: {theorem: {attempt_N: proof}}}` — flat in `output/`
 - **128 attempts**: Default. Configurable via `-n`. Used for Pass@k evaluation
@@ -119,5 +122,5 @@ output/<model>.json
 ```bash
 cargo fmt --check          ✅
 cargo clippy -- -D warnings  ✅
-cargo test                 ✅ 21/21
+cargo test                 ✅ 23/23
 ```

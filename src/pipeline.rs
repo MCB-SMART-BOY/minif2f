@@ -3,7 +3,7 @@ use crate::config::{ModelConfig, PipelineConfig};
 use crate::data::load_all;
 use crate::inference::InferenceEngine;
 use crate::prompts::PromptBuilder;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Map;
 use std::collections::BTreeMap;
@@ -65,15 +65,21 @@ impl EvaluationPipeline {
 
         let pb = PromptBuilder::new(model_cfg.clone());
 
-        let bar = ProgressBar::new(theorems.len() as u64);
+        // ── Load existing results from prior runs (checkpoint resume) ──
+        let json_path =
+            output_dir.join(format!("{}.json", model_cfg.name.replace(['/', ' '], "_")));
+        let mut results: BTreeMap<String, BTreeMap<String, String>> =
+            load_existing_results(&json_path, &model_cfg.name)?;
+
+        // Progress bar: only count theorems not yet done
+        let remaining = theorems.len().saturating_sub(checkpoint.initial_skipped);
+        let bar = ProgressBar::new(remaining as u64);
         bar.set_style(ProgressStyle::default_bar().template("{msg} [{bar:40}] {pos}/{len} {eta}")?);
         bar.set_message("Generating");
 
-        // Build nested result: BTreeMap<theorem_name, BTreeMap<attempt_key, proof>>
-        let mut results: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-
         for theorem in &theorems {
             if checkpoint.is_done(&theorem.name) {
+                // Already completed in prior run — already in `results` from load_existing_results
                 continue;
             }
 
@@ -111,8 +117,6 @@ impl EvaluationPipeline {
 
         // ── Write nested JSON ──────────────────────────────────────────
         println!("\n📝 Writing JSON...");
-        let json_path =
-            output_dir.join(format!("{}.json", model_cfg.name.replace(['/', ' '], "_")));
 
         // Build: { "<model>": { "<theorem>": { "attempt_1": "..." } } }
         let mut model_obj = Map::new();
@@ -147,4 +151,41 @@ impl EvaluationPipeline {
 
         Ok(())
     }
+}
+
+/// Load theorem results from an existing output JSON file (for checkpoint resume).
+fn load_existing_results(
+    path: &std::path::Path,
+    model_name: &str,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading existing output: {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let existing: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing existing output: {}", path.display()))?;
+
+    let mut results = BTreeMap::new();
+    if let Some(model_obj) = existing.get(model_name) {
+        if let Some(theorems_obj) = model_obj.as_object() {
+            for (thm_name, attempts_val) in theorems_obj {
+                let mut attempts_map = BTreeMap::new();
+                if let Some(att_obj) = attempts_val.as_object() {
+                    for (att_key, proof_val) in att_obj {
+                        if let Some(proof_str) = proof_val.as_str() {
+                            attempts_map.insert(att_key.clone(), proof_str.to_string());
+                        }
+                    }
+                }
+                results.insert(thm_name.clone(), attempts_map);
+            }
+        }
+    }
+    Ok(results)
 }

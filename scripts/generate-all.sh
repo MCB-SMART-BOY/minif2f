@@ -96,7 +96,7 @@ for entry in "${models[@]}"; do
         if cargo run --release -- generate \
             -m "$name" -p "$gguf" \
             --port "$PORT" -n "$ATTEMPTS" \
-            --parallel 128 \
+            --parallel 8 \
             --run-id "$run_id"; then
             echo -e "${GREEN}╚══ [$SLOT] DONE:  $name ══╝${NC}"
             break
