@@ -91,12 +91,12 @@ output/<model>.json
 
 | Model | Architecture | Chat Template | Prompt | ctx | Status |
 |-------|-------------|---------------|--------|-----|--------|
-| kimina-prover-rl-1.7b | Qwen3 | ChatML + nothink | kimina | 8192 | ✅ GGUF ready |
-| goedel-prover-v2-8b | Qwen3 | ChatML + nothink | goedel_v2 | 8192 | ❌ |
-| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 8192 | ❌ |
-| kimina-prover-distill-8b | Qwen3 | ChatML + nothink | kimina | 8192 | ❌ |
-| goedel-prover-dpo | DeepSeek Coder | ### | simple | 4096 | ❌ |
-| stp-model-lean | DeepSeek Coder | ### | simple | 2048 | ❌ |
+| kimina-prover-rl-1.7b | Qwen3 | ChatML + nothink | kimina | 8192 | ✅ |
+| goedel-prover-v2-8b | Qwen3 | ChatML + nothink | goedel_v2 | 8192 | ✅ |
+| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 8192 | ✅ |
+| kimina-prover-distill-8b | Qwen3 | ChatML + nothink | kimina | 8192 | ✅ |
+| goedel-prover-dpo | DeepSeek Coder | ### | simple | 4096 | ✅ |
+| stp-model-lean | DeepSeek Coder | ### | simple | 2048 | ✅ |
 
 ## Design
 
