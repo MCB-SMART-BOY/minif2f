@@ -270,7 +270,7 @@ main() {
         "Build Project"
         "Check Status"
         "Generate Proofs (single model)"
-        "Generate All Models (tmux, 3 parallel, auto-queue, 128 attempts)"
+        "Generate All Models (tmux, 2 parallel, auto-queue, 128 attempts)"
         "Do It All (setup → quality → build → generate all)"
     )
 
