@@ -34,9 +34,10 @@ main() {
 
     # Check models
     local ready=0 total=0
-    for name in "${!MODELS[@]}"; do
+    for entry in "${MODELS[@]}"; do
         total=$((total + 1))
-        if [[ -f "${MODELS[$name]}" ]]; then ready=$((ready + 1)); fi
+        IFS='|' read -r _ gguf <<< "$entry"
+        if [[ -f "$gguf" ]]; then ready=$((ready + 1)); fi
     done
     echo "  Ready: $ready/$total models, ${ATTEMPTS} attempts each, ${PARALLEL} parallel"
     echo ""
@@ -116,7 +117,7 @@ WORKEREOF
         exit 1
     fi
 
-    local port=$BASE_PORT
+    local port=8080
     # Window 0 (slot-1) — already created
     tmux send-keys -t "$SESSION:0" \
         "echo 'Slot 1 — popping jobs from queue'" Enter
