@@ -12,11 +12,11 @@ RUN_ID_PREFIX="v128-$(date +%Y%m%d)"
 
 MODELS=(
   "kimina-prover-rl-1.7b|models/kimina-1.7b.gguf"
-  "goedel-prover-dpo|models/goedel-prover-dpo.gguf"
-  "goedel-prover-v2-8b|models/goedel-prover-v2-8b.gguf"
-  "deepseek-prover-v2-7b|models/deepseek-prover-v2-7b.gguf"
-  "kimina-prover-distill-8b|models/kimina-prover-distill-8b.gguf"
   "stp-model-lean|models/stp-model-lean.gguf"
+  "goedel-prover-dpo|models/goedel-prover-dpo.gguf"
+  "deepseek-prover-v2-7b|models/deepseek-prover-v2-7b.gguf"
+  "goedel-prover-v2-8b|models/goedel-prover-v2-8b.gguf"
+  "kimina-prover-distill-8b|models/kimina-prover-distill-8b.gguf"
 )
 
 main() {
