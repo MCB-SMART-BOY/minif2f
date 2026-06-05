@@ -44,7 +44,7 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             max_tokens: 8192,
             ..defaults()
         },
-        // 3. Goedel-Prover-V2-8B — Qwen3 ChatML, official max_new_tokens=32768
+        // 3. Goedel-Prover-V2-8B — Qwen3 ChatML, official max_new_tokens=32768, seed=30
         ModelConfig {
             name: "goedel-prover-v2-8b".into(),
             hf_repo: "Goedel-LM/Goedel-Prover-V2-8B".into(),
@@ -54,9 +54,10 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             quantization: Some("awq".into()),
             max_model_len: 8192,
             max_tokens: 8192,
+            seed: 30,
             ..defaults()
         },
-        // 4. DeepSeek-Prover-V2-7B — DeepSeek V2, official context=32K
+        // 4. DeepSeek-Prover-V2-7B — DeepSeek V2, official context=32K, seed=30
         ModelConfig {
             name: "deepseek-prover-v2-7b".into(),
             hf_repo: "deepseek-ai/DeepSeek-Prover-V2-7B".into(),
@@ -66,6 +67,7 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             quantization: Some("awq".into()),
             max_model_len: 8192,
             max_tokens: 8192,
+            seed: 30,
             stop_sequences: vec![
                 "<｜end▁of▁sentence｜>".into(),
                 "<｜Assistant｜>".into(),
@@ -87,12 +89,14 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             system_prompt: "You are an expert in mathematics and Lean 4.".into(),
             ..defaults()
         },
-        // 6. STP_model_Lean — DeepSeek Coder (finetuned from DeepSeek-Prover-V1.5-SFT)
+        // 6. STP_model_Lean — DeepSeek Coder, tokenizer model_max_length=2048
         ModelConfig {
             name: "stp-model-lean".into(),
             hf_repo: "kfdong/STP_model_Lean".into(),
             architecture: "deepseek_coder".into(),
             prompt_format: "simple".into(), // no official prompt format
+            max_model_len: 2048,
+            max_tokens: 2048,
             quantization: Some("awq".into()),
             stop_sequences: vec!["<|EOT|>".into(), "### Instruction:".into(), "</s>".into()],
             system_prompt: "You are an expert in mathematics and proving theorems in Lean 4.\n\n"
