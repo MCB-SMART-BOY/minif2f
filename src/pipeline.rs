@@ -81,23 +81,18 @@ impl EvaluationPipeline {
             let prompt = pb.build(theorem);
             let mut attempts: BTreeMap<String, String> = BTreeMap::new();
 
-            // Generate n proofs (batched for efficiency)
-            for batch_start in (0..n_attempts).step_by(self.config.completion_attempts.min(8)) {
-                let batch_size = (n_attempts - batch_start).min(8);
-                let texts = engine
-                    .generate_batch_retry(&prompt, batch_size, batch_start)
-                    .await;
-                for (j, text) in texts.iter().enumerate() {
-                    let attempt_num = batch_start + j + 1; // 1-indexed
-                    let raw = text.as_str();
-                    let proof = pb.extract_proof(raw);
-                    let lean_source = if proof.contains("import ") {
-                        proof
-                    } else {
-                        theorem.make_proof_file(&proof)
-                    };
-                    attempts.insert(format!("attempt_{attempt_num}"), lean_source);
-                }
+            // Fire all N requests at once — llama-server's --parallel queues them internally
+            let texts = engine.generate_batch_retry(&prompt, n_attempts, 0).await;
+            for (j, text) in texts.iter().enumerate() {
+                let attempt_num = j + 1; // 1-indexed
+                let raw = text.as_str();
+                let proof = pb.extract_proof(raw);
+                let lean_source = if proof.contains("import ") {
+                    proof
+                } else {
+                    theorem.make_proof_file(&proof)
+                };
+                attempts.insert(format!("attempt_{attempt_num}"), lean_source);
             }
 
             results.insert(theorem.name.clone(), attempts);
