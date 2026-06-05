@@ -24,7 +24,17 @@ main() {
     echo ""
 
     if ! command -v tmux &>/dev/null; then
-        echo "ERROR: tmux is required."
+        echo ""
+        echo "  tmux is required but not installed."
+        echo "  Install: sudo apt install tmux"
+        echo ""
+        exit 1
+    fi
+
+    if ! command -v cargo &>/dev/null; then
+        echo ""
+        echo "  cargo not found. Run: source ~/.cargo/env"
+        echo ""
         exit 1
     fi
 

@@ -217,7 +217,15 @@ do_generate_single() {
 }
 
 do_generate_all() {
-    scripts/generate-all.sh || echo -e "${RED}Generation failed.${NC}"
+    if ! command -v tmux &>/dev/null; then
+        echo ""
+        echo -e "  ${RED}tmux is required but not installed.${NC}"
+        echo "  Install: sudo apt install tmux   (Debian/Ubuntu)"
+        echo "  Or use:  cargo run --release -- generate -m <model> -p <gguf>"
+        return 1
+    fi
+    echo ""
+    scripts/generate-all.sh || echo -e "  ${RED}Generation exited with code $?.${NC}"
 }
 
 do_it_all() {
