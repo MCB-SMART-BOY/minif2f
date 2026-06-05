@@ -125,8 +125,11 @@ RUNEOF
     echo "  Ctrl-B d                       # detach (keeps running)"
     echo ""
 
-    # Only attach interactively
-    if [[ -t 0 ]]; then
+    # Don't nest tmux sessions
+    if [[ -n "${TMUX:-}" ]]; then
+        echo "  Already in tmux — switch to window: Ctrl-B w → select '${SESSION}'"
+        echo "  Or: tmux switch-client -t ${SESSION}"
+    elif [[ -t 0 ]]; then
         tmux attach -t "$SESSION"
     else
         echo "  (non-interactive — generation continues in background)"

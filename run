@@ -214,7 +214,7 @@ do_generate_single() {
 }
 
 do_generate_all() {
-    scripts/generate-all.sh
+    scripts/generate-all.sh || echo -e "${RED}Generation failed.${NC}"
 }
 
 do_it_all() {
