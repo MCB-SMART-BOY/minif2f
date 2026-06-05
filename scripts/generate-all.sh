@@ -86,22 +86,31 @@ for entry in "${models[@]}"; do
     echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Kill any orphaned llama-server on this port (from previous crash)
+    # Kill any orphaned llama-server on this port
     fuser -k "$PORT/tcp" 2>/dev/null || true
     sleep 2
 
-    # Let VRAM free from previous model
-    sleep 3
-
-    if cargo run --release -- generate \
-        -m "$name" -p "$gguf" \
-        --port "$PORT" -n "$ATTEMPTS" \
-        --parallel 128 \
-        --run-id "$run_id"; then
-        echo -e "${GREEN}╚══ [$SLOT] DONE:  $name ══╝${NC}"
-    else
-        echo -e "${RED}╚══ [$SLOT] FAIL:  $name ══╝${NC}"
-    fi
+    # Retry loop — transient failures (VRAM, port) self-heal
+    attempt=1; max_attempts=5
+    while ((attempt <= max_attempts)); do
+        echo -e "  Attempt $attempt/$max_attempts..."
+        if cargo run --release -- generate \
+            -m "$name" -p "$gguf" \
+            --port "$PORT" -n "$ATTEMPTS" \
+            --parallel 128 \
+            --run-id "$run_id"; then
+            echo -e "${GREEN}╚══ [$SLOT] DONE:  $name ══╝${NC}"
+            break
+        fi
+        if ((attempt < max_attempts)); then
+            wait=$((2 ** (attempt - 1)))
+            echo -e "${RED}  Attempt $attempt failed — retrying in ${wait}s...${NC}"
+            sleep "$wait"
+        else
+            echo -e "${RED}╚══ [$SLOT] FAIL:  $name (after $max_attempts attempts) ══╝${NC}"
+        fi
+        ((attempt++))
+    done
 done
 echo -e "${GREEN}[$SLOT] All models in this slot done.${NC}"
 WORKEREOF
