@@ -188,17 +188,13 @@ impl InferenceEngine {
         results
     }
 
-    /// Kill the server process.
     fn kill(&self) {
-        let _ = Command::new("pkill")
-            .args(["-P", &self.server.id().to_string()])
-            .output();
         let _ = Command::new("kill")
             .args(["-9", &self.server.id().to_string()])
             .output();
     }
 
-    /// Shut down the server and free GPU memory.
+    /// Shut down server immediately (frees GPU). Drop handles zombie reaping.
     pub fn stop(self) {
         self.kill();
     }
@@ -206,12 +202,6 @@ impl InferenceEngine {
 
 impl Drop for InferenceEngine {
     fn drop(&mut self) {
-        let _ = Command::new("pkill")
-            .args(["-P", &self.server.id().to_string()])
-            .output();
-        let _ = Command::new("kill")
-            .args(["-9", &self.server.id().to_string()])
-            .output();
         let _ = self.server.kill();
         let _ = self.server.wait();
     }
