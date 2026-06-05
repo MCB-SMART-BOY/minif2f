@@ -25,6 +25,7 @@ impl InferenceEngine {
         model_path: &str,
         port: u16,
         llama_server_binary: &str,
+        parallel: u32,
     ) -> Result<Self> {
         let child = Command::new(llama_server_binary)
             .args([
@@ -39,7 +40,7 @@ impl InferenceEngine {
                 "--batch-size",
                 "256",
                 "--parallel",
-                "2",
+                &parallel.to_string(),
                 "--no-warmup",
                 "--api-key",
                 "minif2f",

@@ -26,6 +26,7 @@ pub struct PipelineConfig {
     pub llama_server_binary: String,
     pub port: u16,
     pub completion_attempts: usize,
+    pub parallel: u32,
 }
 
 impl Default for PipelineConfig {
@@ -35,6 +36,7 @@ impl Default for PipelineConfig {
             llama_server_binary: "llama-server".into(),
             port: 8080,
             completion_attempts: 128,
+            parallel: 8,
         }
     }
 }
