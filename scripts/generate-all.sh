@@ -86,6 +86,13 @@ for entry in "${models[@]}"; do
     echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
 
+    # Kill any orphaned llama-server on this port (from previous crash)
+    fuser -k "$PORT/tcp" 2>/dev/null || true
+    sleep 2
+
+    # Let VRAM free from previous model
+    sleep 3
+
     if cargo run --release -- generate \
         -m "$name" -p "$gguf" \
         --port "$PORT" -n "$ATTEMPTS" \
