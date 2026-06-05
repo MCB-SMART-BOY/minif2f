@@ -30,7 +30,6 @@ banner() {
 choose() {
     local prompt="$1"; shift
     local options=("$@")
-    # Write menu to stderr so stdout capture ($(...)) only gets the result
     echo -e "${CYAN}${prompt}${NC}" >&2
     for i in "${!options[@]}"; do
         printf "  ${BOLD}%d)${NC} %s\n" "$((i + 1))" "${options[$i]}" >&2
@@ -54,11 +53,14 @@ confirm() {
 }
 
 # ── Actions ─────────────────────────────────────────────────────────
+do_setup() {
+    scripts/setup.sh
+}
+
 do_list_models() {
     echo ""
     echo -e "${BOLD}Available models:${NC}"
     echo ""
-    # Sort keys for stable output
     local names=()
     for name in "${!MODELS[@]}"; do names+=("$name"); done
     IFS=$'\n' names=($(sort <<<"${names[*]}")); unset IFS
@@ -74,6 +76,60 @@ do_list_models() {
     done
 }
 
+do_quality() {
+    echo ""
+    echo -e "${BOLD}Running quality gates...${NC}"
+    echo ""
+    local tmp
+    tmp=$(mktemp)
+
+    echo -n "  cargo fmt --check ... "
+    if cargo fmt --check &>"$tmp"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        sed 's/^/    /' "$tmp"
+        echo "  (auto-formatted, please re-run)"
+        cargo fmt
+        rm -f "$tmp"
+        return 1
+    fi
+
+    echo -n "  cargo clippy ... "
+    if cargo clippy -- -D warnings &>"$tmp"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        tail -10 "$tmp" | sed 's/^/    /'
+        rm -f "$tmp"
+        return 1
+    fi
+
+    echo -n "  cargo test ... "
+    if cargo test &>"$tmp"; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        tail -10 "$tmp" | sed 's/^/    /'
+        rm -f "$tmp"
+        return 1
+    fi
+
+    rm -f "$tmp"
+    echo ""
+    echo -e "  ${GREEN}${BOLD}All gates passed${NC}"
+    echo ""
+}
+
+do_build() {
+    echo ""
+    echo -e "${BOLD}Building...${NC}"
+    cargo build --release
+    echo ""
+    echo -e "  ${GREEN}${BOLD}Build complete${NC}"
+    echo ""
+}
+
 do_status() {
     echo ""
     echo -e "${BOLD}Checkpoint status:${NC}"
@@ -85,19 +141,16 @@ do_status() {
         found=1
         local filename model run_id content count
         filename=$(basename "$f" .json)
-        # Parse model name from "<model>__<run_id>.json" format
         if [[ "$filename" =~ ^(.+)__(.+)$ ]]; then
             model="${BASH_REMATCH[1]}"
             run_id="${BASH_REMATCH[2]}"
         else
-            model="$filename"
-            run_id="?"
+            model="$filename"; run_id="?"
         fi
         content=$(<"$f")
         if [[ "$content" == "[]" ]]; then
             count=0
         else
-            # JSON array of strings: count commas + 1
             count=$(tr -dc ',' <<<"$content" | wc -c)
             count=$((count + 1))
         fi
@@ -110,71 +163,7 @@ do_status() {
     echo ""
 }
 
-do_quality() {
-    echo ""
-    echo -e "${BOLD}Running quality gates...${NC}"
-    echo ""
-
-    local tmp
-    tmp=$(mktemp)
-
-    echo -n "  cargo fmt --check ... "
-    if cargo fmt --check &>"$tmp"; then
-        echo -e "${GREEN}OK${NC}"
-    else
-        echo -e "${RED}FAIL${NC}"
-        echo "    ---"
-        sed 's/^/    /' "$tmp"
-        echo "    ---"
-        cargo fmt
-        rm -f "$tmp"
-        echo "  (auto-formatted, please re-run)"
-        return 1
-    fi
-
-    echo -n "  cargo clippy ... "
-    if cargo clippy -- -D warnings &>"$tmp"; then
-        echo -e "${GREEN}OK${NC}"
-    else
-        echo -e "${RED}FAIL${NC}"
-        echo "    ---"
-        tail -10 "$tmp" | sed 's/^/    /'
-        echo "    ---"
-        rm -f "$tmp"
-        return 1
-    fi
-
-    echo -n "  cargo test ... "
-    if cargo test &>"$tmp"; then
-        echo -e "${GREEN}OK${NC}"
-    else
-        echo -e "${RED}FAIL${NC}"
-        echo "    ---"
-        tail -10 "$tmp" | sed 's/^/    /'
-        echo "    ---"
-        rm -f "$tmp"
-        return 1
-    fi
-
-    rm -f "$tmp"
-
-    echo ""
-    echo -e "  ${GREEN}${BOLD}All gates passed ✅${NC}"
-    echo ""
-}
-
-do_build() {
-    echo ""
-    echo -e "${BOLD}Building...${NC}"
-    cargo build
-    echo ""
-    echo -e "  ${GREEN}${BOLD}Build complete ✅${NC}"
-    echo ""
-}
-
-do_generate() {
-    # ── Pick model ──────────────────────────────────────────────────
-    # Build sorted parallel arrays: display_names + keys
+do_generate_single() {
     local display_names=()
     local model_keys=()
     local names=()
@@ -185,7 +174,7 @@ do_generate() {
         if [[ -f "${MODELS[$name]}" ]]; then
             display_names+=("$name")
         else
-            display_names+=("$name (GGUF missing — needs conversion)")
+            display_names+=("$name (GGUF missing)")
         fi
     done
 
@@ -196,24 +185,18 @@ do_generate() {
 
     if [[ ! -f "$gguf" ]]; then
         echo ""
-        echo -e "${RED}GGUF file not found: ${gguf}${NC}"
-        echo "Run model conversion first (see .claude/skills/convert-model.md)"
+        echo -e "${RED}GGUF not found: ${gguf}${NC}"
         return 1
     fi
 
-    # ── Run ID ──────────────────────────────────────────────────────
     local run_id
     run_id="$(date +%Y%m%d-%H%M%S)"
     echo ""
-    echo -e "  Run ID: ${BOLD}${run_id}${NC} (auto-generated)"
-
-    # ── Confirm ─────────────────────────────────────────────────────
+    echo -e "  Run ID: ${BOLD}${run_id}${NC}"
     echo ""
     echo -e "  ${BOLD}Summary:${NC}"
     echo -e "    Model:     ${CYAN}${model_name}${NC}"
-    echo -e "    GGUF:      ${gguf}"
     echo -e "    Theorems:  488"
-    echo -e "    Run ID:    ${run_id}"
     echo -e "    Output:    output/${model_name}.json"
 
     if ! confirm "Start generation?"; then
@@ -221,25 +204,38 @@ do_generate() {
         return 0
     fi
 
-    # ── Run ─────────────────────────────────────────────────────────
     echo ""
-    echo -e "${GREEN}${BOLD}Starting generation...${NC}"
+    echo -e "${GREEN}${BOLD}Starting...${NC}"
     echo ""
-    cargo run -- generate \
-        -m "$model_name" \
-        -p "$gguf" \
-        --run-id "$run_id"
+    cargo run --release -- generate -m "$model_name" -p "$gguf" --run-id "$run_id"
 
     echo ""
-    echo -e "  Output:   ${BOLD}output/${model_name}.json${NC}"
-    echo -e "  Status:   ${BOLD}cargo run -- status --run-id ${run_id}${NC}"
+    echo -e "  Output: ${BOLD}output/${model_name}.json${NC}"
+}
+
+do_generate_all() {
+    scripts/generate-all.sh
+}
+
+do_it_all() {
+    echo ""
+    echo -e "${BOLD}Do It All${NC} — setup + quality + build + generate all models"
+    echo ""
+    if ! confirm "Run full pipeline?"; then
+        echo "Canceled."
+        return 0
+    fi
+
+    scripts/setup.sh
+    do_quality || { echo -e "${RED}Quality gates failed — aborting.${NC}"; return 1; }
+    do_build
+    scripts/generate-all.sh
 }
 
 # ── Main ────────────────────────────────────────────────────────────
 main() {
-    # Must run interactively
     if [[ ! -t 0 ]]; then
-        echo "ERROR: ./run must be run interactively (no pipes or redirects)."
+        echo "ERROR: ./run must be run interactively."
         echo "Use: cargo run --release -- generate -m <model> -p <gguf>"
         exit 1
     fi
@@ -247,24 +243,28 @@ main() {
     banner
 
     local actions=(
-        "Generate Proofs (single model)"
-        "Generate All Models (tmux, 6 models)"
-        "Check Status"
+        "Setup Environment"
         "List Models"
         "Quality Gates (fmt + clippy + test)"
         "Build Project"
+        "Check Status"
+        "Generate Proofs (single model)"
+        "Generate All Models (tmux, 6 models, 128 attempts)"
+        "Do It All (setup → quality → build → generate all)"
     )
 
     local idx
     idx=$(choose "What do you want to do?" "${actions[@]}")
 
     case "$idx" in
-        0) do_generate ;;
-        1) ./scripts/generate-all.sh ;;
-        2) do_status ;;
-        3) do_list_models ;;
-        4) do_quality ;;
-        5) do_build ;;
+        0) do_setup ;;
+        1) do_list_models ;;
+        2) do_quality ;;
+        3) do_build ;;
+        4) do_status ;;
+        5) do_generate_single ;;
+        6) do_generate_all ;;
+        7) do_it_all ;;
     esac
 }
 
