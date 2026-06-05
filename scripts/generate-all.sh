@@ -2,11 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+PROJECT_DIR="$(pwd)"
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 
 ATTEMPTS="${ATTEMPTS:-128}"
 SESSION="minif2f-gen"
-PORT=8080
 RUN_ID_PREFIX="v128-$(date +%Y%m%d)"
 
 declare -A MODELS
@@ -17,15 +17,11 @@ MODELS["deepseek-prover-v2-7b"]="models/deepseek-prover-v2-7b.gguf"
 MODELS["kimina-prover-distill-8b"]="models/kimina-prover-distill-8b.gguf"
 MODELS["stp-model-lean"]="models/stp-model-lean.gguf"
 
-banner() {
+main() {
     echo -e "${BOLD}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║  Generate All 6 Models (${ATTEMPTS}×/theorem)  ║${NC}"
+    echo -e "${BOLD}║  Generate All 6 Models (${ATTEMPTS} attempts)  ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
     echo ""
-}
-
-main() {
-    banner
 
     if ! command -v tmux &>/dev/null; then
         echo "ERROR: tmux is required."
@@ -44,11 +40,12 @@ main() {
     echo "  Ready: $((total - missing))/$total models, ${ATTEMPTS} attempts each"
     echo ""
 
-    # Build the sequential run script
+    # Build the sequential run script (runs inside tmux)
     local run_script="/tmp/minif2f-gen-sequence.sh"
     cat > "$run_script" << 'RUNEOF'
 #!/usr/bin/env bash
 set -euo pipefail
+cd "PROJECT_DIR_PLACEHOLDER"
 
 BOLD='\033[1m'; GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 
@@ -62,7 +59,6 @@ MODELS=(
 )
 
 ATTEMPTS="${ATTEMPTS:-128}"
-PORT=8080
 RUN_ID_PREFIX="$(date +%Y%m%d)"
 
 total=${#MODELS[@]}
@@ -90,7 +86,7 @@ for entry in "${MODELS[@]}"; do
 
     if cargo run --release -- generate \
         -m "$name" -p "$gguf" \
-        --port "$PORT" -n "$ATTEMPTS" \
+        --port 8080 -n "$ATTEMPTS" \
         --parallel 8 \
         --run-id "$run_id"; then
         echo -e "${GREEN}[$current/$total] DONE: $name${NC}"
@@ -111,20 +107,17 @@ echo -e "  Output: output/*.json"
 echo -e "${BOLD}═══════════════════════════════════════${NC}"
 RUNEOF
 
+    # Inject project directory into the generated script
+    sed -i "s|PROJECT_DIR_PLACEHOLDER|$PROJECT_DIR|" "$run_script"
     chmod +x "$run_script"
 
-    # Kill existing session, start new one
+    # Create tmux session (sets working directory to project root)
     tmux kill-session -t "$SESSION" 2>/dev/null || true
-    tmux new-session -d -s "$SESSION" -n "generate-all"
+    tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -n "generate-all"
 
-    tmux send-keys -t "$SESSION:0" \
-        "echo 'Models run sequentially: one loaded, generates, unloads, next starts.'" Enter
-    tmux send-keys -t "$SESSION:0" \
-        "echo 'Detach with Ctrl-B d — generation continues in background.'" Enter
-    tmux send-keys -t "$SESSION:0" \
-        "echo ''" Enter
-    tmux send-keys -t "$SESSION:0" \
-        "bash '$run_script'" Enter
+    tmux send-keys -t "$SESSION:0" "echo 'Sequential: one model at a time. Ctrl-B d to detach.'" Enter
+    tmux send-keys -t "$SESSION:0" "echo ''" Enter
+    tmux send-keys -t "$SESSION:0" "bash '$run_script'" Enter
 
     echo -e "  ${BOLD}Started in tmux session '${SESSION}'${NC}"
     echo ""
@@ -132,12 +125,11 @@ RUNEOF
     echo "  Ctrl-B d                       # detach (keeps running)"
     echo ""
 
-    # Only attach if running in a real terminal (not inside do_it_all pipeline)
+    # Only attach interactively
     if [[ -t 0 ]]; then
         tmux attach -t "$SESSION"
     else
         echo "  (non-interactive — generation continues in background)"
-        echo "  Attach later: tmux attach -t ${SESSION}"
     fi
 }
 
