@@ -91,6 +91,7 @@ for entry in "${MODELS[@]}"; do
     if cargo run --release -- generate \
         -m "$name" -p "$gguf" \
         --port "$PORT" -n "$ATTEMPTS" \
+        --parallel 8 \
         --run-id "$run_id"; then
         echo -e "${GREEN}[$current/$total] DONE: $name${NC}"
     else
