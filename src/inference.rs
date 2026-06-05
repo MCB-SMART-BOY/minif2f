@@ -1,5 +1,6 @@
 use crate::config::ModelConfig;
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
 use std::process::{Child, Command};
@@ -99,7 +100,8 @@ impl InferenceEngine {
     }
 
     /// Generate a single completion with retries for transient errors.
-    async fn generate_one_with_retry(
+    /// Public for use by the pipeline's streaming request pool.
+    pub async fn generate_one_with_retry(
         client: &Client,
         url: &str,
         body: serde_json::Value,
@@ -145,15 +147,16 @@ impl InferenceEngine {
         String::new()
     }
 
-    /// Generate n completions with per-request retries (graceful degradation).
-    /// Each request retries independently; failures produce empty strings but don't
-    /// abort the batch.
-    pub async fn generate_batch_retry(
+    /// Generate n completions — returns a stream of (attempt_index, text) as
+    /// each request completes. No barrier: results are yielded immediately,
+    /// keeping llama-server slots fed and GPU saturated.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn generate_stream(
         &self,
         prompt: &str,
         n: usize,
         attempt_offset: usize,
-    ) -> Vec<String> {
+    ) -> FuturesUnordered<impl futures::Future<Output = (usize, String)>> {
         let url = format!("{}/completion", self.base_url);
         let prompt = prompt.to_string();
         let client = self.client.clone();
@@ -161,9 +164,9 @@ impl InferenceEngine {
         let temperature = self.config.temperature;
         let top_p = self.config.top_p;
         let base_seed = self.config.seed;
+        let stop_sequences = self.config.stop_sequences.clone();
 
-        let mut tasks = Vec::with_capacity(n);
-        #[allow(clippy::cast_possible_truncation)]
+        let futures: FuturesUnordered<_> = FuturesUnordered::new();
         for i in 0..n {
             let body = serde_json::json!({
                 "prompt": prompt,
@@ -171,21 +174,46 @@ impl InferenceEngine {
                 "temperature": temperature,
                 "top_p": top_p,
                 "seed": base_seed.wrapping_add(attempt_offset as u64 + i as u64) as u32,
-                "stop": self.config.stop_sequences,
+                "stop": stop_sequences,
                 "n_probs": 0,
             });
             let client = client.clone();
             let url = url.clone();
-            tasks.push(tokio::spawn(async move {
-                Self::generate_one_with_retry(&client, &url, body, 3).await
-            }));
+            futures.push(async move {
+                let text = Self::generate_one_with_retry(&client, &url, body, 3).await;
+                (i, text)
+            });
         }
+        futures
+    }
 
-        let mut results = Vec::with_capacity(n);
-        for t in tasks {
-            results.push(t.await.unwrap_or_default());
+    /// Generate n completions with per-request retries (graceful degradation).
+    /// Legacy batch API — returns all results at once (barrier).
+    /// Prefer `generate_stream` for better GPU utilization.
+    pub async fn generate_batch_retry(
+        &self,
+        prompt: &str,
+        n: usize,
+        attempt_offset: usize,
+    ) -> Vec<String> {
+        let mut stream = self.generate_stream(prompt, n, attempt_offset);
+        let mut results: Vec<Option<String>> = vec![None; n];
+        while let Some((i, text)) = stream.next().await {
+            results[i] = Some(text);
         }
-        results
+        results.into_iter().map(|r| r.unwrap_or_default()).collect()
+    }
+
+    /// Access the HTTP client (for streaming requests from pipeline).
+    #[must_use]
+    pub fn http_client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Access the llama-server base URL.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     fn kill(&self) {

@@ -4,6 +4,7 @@ use crate::data::load_all;
 use crate::inference::InferenceEngine;
 use crate::prompts::PromptBuilder;
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Map;
 use std::collections::BTreeMap;
@@ -26,6 +27,11 @@ impl EvaluationPipeline {
 
     /// Run the full generation pipeline for a single model.
     ///
+    /// Uses streaming request processing — results flow as each completion
+    /// arrives, eliminating the per-theorem barrier. A bounded semaphore
+    /// keeps in-flight request count at `parallel × 4` to saturate the GPU
+    /// without overwhelming llama-server queues.
+    ///
     /// # Errors
     ///
     /// Returns an error if the dataset cannot be loaded, the inference engine
@@ -33,7 +39,6 @@ impl EvaluationPipeline {
     #[allow(clippy::cast_precision_loss)]
     pub async fn run(&self, model_cfg: &ModelConfig, model_path: &str) -> Result<()> {
         let theorems = load_all(&self.config.data_path())?;
-
         println!("   Theorems: {}", theorems.len());
 
         // ── Start inference engine ──────────────────────────────────────
@@ -58,7 +63,7 @@ impl EvaluationPipeline {
         let output_dir = self.config.output_dir();
         std::fs::create_dir_all(&output_dir)?;
 
-        let mut checkpoint =
+        let checkpoint =
             CheckpointManager::new(&self.config.checkpoint_dir(), &model_cfg.name, &self.run_id)?;
 
         let n_attempts = self.config.completion_attempts;
@@ -71,26 +76,49 @@ impl EvaluationPipeline {
         let mut results: BTreeMap<String, BTreeMap<String, String>> =
             load_existing_results(&json_path, &model_cfg.name)?;
 
+        // ── Stream results as they complete (no per-theorem barrier) ──
+        // `generate_stream` returns a FuturesUnordered that yields each
+        // attempt's result as soon as it arrives. The llama-server's
+        // internal --parallel queue keeps the GPU saturated.
+
         // Progress bar: only count theorems not yet done
         let remaining = theorems.len().saturating_sub(checkpoint.initial_skipped);
         let bar = ProgressBar::new(remaining as u64);
         bar.set_style(ProgressStyle::default_bar().template("{msg} [{bar:40}] {pos}/{len} {eta}")?);
         bar.set_message("Generating");
 
+        // ── Pre-build all prompts (string clone is cheap vs GPU time) ──
+        struct TheoremJob {
+            prompt: String,
+            attempts: BTreeMap<String, String>,
+        }
+        let mut jobs: BTreeMap<String, TheoremJob> = BTreeMap::new();
         for theorem in &theorems {
             if checkpoint.is_done(&theorem.name) {
-                // Already completed in prior run — already in `results` from load_existing_results
                 continue;
             }
+            jobs.insert(
+                theorem.name.clone(),
+                TheoremJob {
+                    prompt: pb.build(theorem),
+                    attempts: BTreeMap::new(),
+                },
+            );
+        }
+        let mut completed_theorems = 0;
 
-            // Build prompt (reused across all attempts)
-            let prompt = pb.build(theorem);
-            let mut attempts: BTreeMap<String, String> = BTreeMap::new();
+        // ── Process theorems sequentially, but stream results within each ──
+        // The semaphore carries over between theorems: as soon as theorem N's
+        // last few requests are finishing, theorem N+1's requests start firing.
+        for theorem in &theorems {
+            let Some(mut job) = jobs.remove(&theorem.name) else {
+                continue; // already done via checkpoint
+            };
 
-            // Fire all N requests at once — llama-server's --parallel queues them internally
-            let texts = engine.generate_batch_retry(&prompt, n_attempts, 0).await;
-            for (j, text) in texts.iter().enumerate() {
-                let attempt_num = j + 1; // 1-indexed
+            // Stream 128 requests — results arrive as they complete
+            let mut stream = engine.generate_stream(&job.prompt, n_attempts, 0);
+
+            while let Some((i, text)) = stream.next().await {
                 let raw = text.as_str();
                 let proof = pb.extract_proof(raw);
                 let lean_source = if proof.contains("import ") {
@@ -98,19 +126,33 @@ impl EvaluationPipeline {
                 } else {
                     theorem.make_proof_file(&proof)
                 };
-                attempts.insert(format!("attempt_{attempt_num}"), lean_source);
+                job.attempts
+                    .insert(format!("attempt_{}", i + 1), lean_source);
             }
 
-            results.insert(theorem.name.clone(), attempts);
+            results.insert(theorem.name.clone(), job.attempts);
 
-            checkpoint.mark_done(&theorem.name)?;
+            // Async checkpoint write — don't block the next theorem
+            let ck_thm = theorem.name.clone();
+            let ck_dir = self.config.checkpoint_dir();
+            let ck_model = model_cfg.name.clone();
+            let ck_run = self.run_id.clone();
+            drop(tokio::task::spawn_blocking(move || {
+                if let Ok(mut ck) = CheckpointManager::new(&ck_dir, &ck_model, &ck_run) {
+                    let _ = ck.mark_done(&ck_thm);
+                }
+            }));
+
+            completed_theorems += 1;
             bar.inc(1);
         }
+
         bar.finish_with_message("Generation done");
 
-        let done = checkpoint.total_done() - checkpoint.initial_skipped;
-        let skipped = checkpoint.initial_skipped;
-        println!("   ✅ {done} theorems generated ({skipped} skipped)");
+        println!(
+            "   ✅ {completed_theorems} theorems generated ({} skipped)",
+            checkpoint.initial_skipped
+        );
 
         // Shut down inference engine (frees GPU)
         engine.stop();
@@ -118,7 +160,6 @@ impl EvaluationPipeline {
         // ── Write nested JSON ──────────────────────────────────────────
         println!("\n📝 Writing JSON...");
 
-        // Build: { "<model>": { "<theorem>": { "attempt_1": "..." } } }
         let mut model_obj = Map::new();
         let mut theorem_map = Map::new();
         for (thm_name, attempts) in &results {
@@ -140,11 +181,10 @@ impl EvaluationPipeline {
         std::fs::write(&json_path, &json_str)?;
 
         let file_size = json_str.len();
-
         println!("\n╔══════════════════════════════════╗");
         println!("║  Generation complete!            ║");
         println!("╠══════════════════════════════════╣");
-        println!("║  Theorems: {done:>4}                 ║");
+        println!("║  Theorems: {completed_theorems:>4}                 ║");
         let size_mb = file_size as f64 / 1_000_000.0;
         println!("║  Output:   {} ({:.1} MB) ║", json_path.display(), size_mb);
         println!("╚══════════════════════════════════╝");
