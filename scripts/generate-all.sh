@@ -41,10 +41,10 @@ main() {
     # Check models
     local missing=0 total=0
     for name in "${!MODELS[@]}"; do
-        ((total++))
+        total=$((total + 1))
         if [[ ! -f "${MODELS[$name]}" ]]; then
             echo -e "  ${RED}MISSING${NC}: ${MODELS[$name]} — $name skipped"
-            ((missing++))
+            missing=$((missing + 1))
         fi
     done
     echo "  Ready: $((total - missing))/$total models, ${ATTEMPTS} attempts each"
@@ -80,7 +80,7 @@ echo ""
 
 for entry in "${MODELS[@]}"; do
     IFS='|' read -r name gguf <<< "$entry"
-    ((current++))
+    current=$((current + 1))
 
     if [[ ! -f "$gguf" ]]; then
         echo -e "${RED}[$current/$total] SKIP $name — GGUF not found${NC}"
@@ -102,7 +102,7 @@ for entry in "${MODELS[@]}"; do
         echo -e "${GREEN}[$current/$total] DONE: $name${NC}"
     else
         echo -e "${RED}[$current/$total] FAILED: $name${NC}"
-        ((failed++))
+        failed=$((failed + 1))
     fi
     echo ""
 done
