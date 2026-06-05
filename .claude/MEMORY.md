@@ -1,0 +1,8 @@
+- [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem, 6 models, nested JSON output
+- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, llama-server GPU inference
+- [Pipeline Architecture](memory/pipeline-architecture.md) — Generate → validate → collect → JSON, checkpoint resume
+- [Model Registry](memory/model-registry.md) — 6 models, chat templates, `<think>` mode, GGUF status
+- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 23 tests
+- [Git Commit Style](memory/git-commit-style.md) — No Co-Authored-By lines in commits
+- [Kimina-Prover Think Mode](memory/kimina-prover-think-mode.md) — RL format reward requires `<think>`; empty think breaks model
+- [Checkpoint Resume Fix](memory/checkpoint-resume-fix.md) — Loads existing JSON on resume; no data loss

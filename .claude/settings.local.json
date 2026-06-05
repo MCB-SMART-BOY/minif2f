@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(lake:*)",
+      "Bash(lean:*)",
+      "Bash(llama-server:*)",
+      "Bash(llama-cli:*)",
+      "Bash(hf:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(cd:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(du:*)",
+      "Bash(wc:*)",
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(which:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(export:*)",
+      "Bash(echo:*)",
+      "Bash(ps:*)",
+      "Bash(rm:*)",
+      "Bash(cp:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sleep:*)",
+      "Bash(git:*)",
+      "WebSearch(*)"
+    ]
+  }
+}
