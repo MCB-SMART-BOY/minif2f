@@ -101,8 +101,7 @@ async fn main() -> anyhow::Result<()> {
             println!("╚══════════════════════════════════╝");
         }
         Commands::Report { .. } => {
-            println!("Report generation is not available.");
-            println!("This is a proof generation tool — check output/archives/ for generated .tar.gz files.");
+            println!("Report generation is not available. Check output/*.json for results.");
         }
         Commands::Status { run_id } => {
             println!("Checkpoint status for run '{run_id}':");
