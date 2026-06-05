@@ -2,12 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 
-# ── Config ────────────────────────────────────────────────────────────
 ATTEMPTS="${ATTEMPTS:-128}"
-PARALLEL="${PARALLEL:-4}"
 SESSION="minif2f-gen"
+PORT=8080
 RUN_ID_PREFIX="v128-$(date +%Y%m%d)"
 
 declare -A MODELS
@@ -18,85 +17,120 @@ MODELS["deepseek-prover-v2-7b"]="models/deepseek-prover-v2-7b.gguf"
 MODELS["kimina-prover-distill-8b"]="models/kimina-prover-distill-8b.gguf"
 MODELS["stp-model-lean"]="models/stp-model-lean.gguf"
 
-# ── Helpers ───────────────────────────────────────────────────────────
 banner() {
     echo -e "${BOLD}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║    Generate All 6 Models (${ATTEMPTS}×/theorem) ║${NC}"
+    echo -e "${BOLD}║  Generate All 6 Models (${ATTEMPTS}×/theorem)  ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
     echo ""
 }
 
-# ── Main ──────────────────────────────────────────────────────────────
 main() {
     banner
 
-    # Check tmux
     if ! command -v tmux &>/dev/null; then
-        echo "ERROR: tmux is required. Install it first."
+        echo "ERROR: tmux is required."
         exit 1
     fi
 
-    # Check models exist
-    local missing=0
+    # Check models
+    local missing=0 total=0
     for name in "${!MODELS[@]}"; do
+        ((total++))
         if [[ ! -f "${MODELS[$name]}" ]]; then
-            echo -e "  ${YELLOW}MISSING${NC}: ${MODELS[$name]} — $name will be skipped"
+            echo -e "  ${RED}MISSING${NC}: ${MODELS[$name]} — $name skipped"
             ((missing++))
         fi
     done
-    if ((missing > 0)); then
-        echo ""
-        echo "  Missing $missing GGUF files. Run setup.sh first."
-        echo ""
+    echo "  Ready: $((total - missing))/$total models, ${ATTEMPTS} attempts each"
+    echo ""
+
+    # Build the sequential run script
+    local run_script="/tmp/minif2f-gen-sequence.sh"
+    cat > "$run_script" << 'RUNEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'; GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+MODELS=(
+  "kimina-prover-rl-1.7b|models/kimina-1.7b.gguf"
+  "goedel-prover-dpo|models/goedel-prover-dpo.gguf"
+  "goedel-prover-v2-8b|models/goedel-prover-v2-8b.gguf"
+  "deepseek-prover-v2-7b|models/deepseek-prover-v2-7b.gguf"
+  "kimina-prover-distill-8b|models/kimina-prover-distill-8b.gguf"
+  "stp-model-lean|models/stp-model-lean.gguf"
+)
+
+ATTEMPTS="${ATTEMPTS:-128}"
+PORT=8080
+RUN_ID_PREFIX="$(date +%Y%m%d)"
+
+total=${#MODELS[@]}
+current=0
+failed=0
+
+echo -e "${BOLD}Starting sequential generation ($total models, ${ATTEMPTS} attempts each)${NC}"
+echo ""
+
+for entry in "${MODELS[@]}"; do
+    IFS='|' read -r name gguf <<< "$entry"
+    ((current++))
+
+    if [[ ! -f "$gguf" ]]; then
+        echo -e "${RED}[$current/$total] SKIP $name — GGUF not found${NC}"
+        continue
     fi
 
-    echo -e "  ${BOLD}${#MODELS[@]} models${NC}, ${PARALLEL} parallel, ${ATTEMPTS} attempts/theorem"
-    echo -e "  ${CYAN}tmux session: ${SESSION}${NC}"
+    run_id="${RUN_ID_PREFIX}-${name}"
+
+    echo -e "${CYAN}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║  [$current/$total] $name${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Kill existing session if any
+    if cargo run --release -- generate \
+        -m "$name" -p "$gguf" \
+        --port "$PORT" -n "$ATTEMPTS" \
+        --run-id "$run_id"; then
+        echo -e "${GREEN}[$current/$total] DONE: $name${NC}"
+    else
+        echo -e "${RED}[$current/$total] FAILED: $name${NC}"
+        ((failed++))
+    fi
+    echo ""
+done
+
+echo ""
+echo -e "${BOLD}═══════════════════════════════════════${NC}"
+echo -e "${BOLD}  Complete: $((total - failed))/$total models${NC}"
+if ((failed > 0)); then
+    echo -e "${RED}  Failed: $failed models${NC}"
+fi
+echo -e "  Output: output/*.json"
+echo -e "${BOLD}═══════════════════════════════════════${NC}"
+RUNEOF
+
+    chmod +x "$run_script"
+
+    # Kill existing session, start new one
     tmux kill-session -t "$SESSION" 2>/dev/null || true
+    tmux new-session -d -s "$SESSION" -n "generate-all"
 
-    # Create tmux session
-    tmux new-session -d -s "$SESSION" -n "overview"
-
-    # Overview window: show status of all models
     tmux send-keys -t "$SESSION:0" \
-        "echo 'Generating all 6 models (${ATTEMPTS} attempts × 488 theorems each)'" Enter
+        "echo 'Models run sequentially: one loaded, generates, unloads, next starts.'" Enter
     tmux send-keys -t "$SESSION:0" \
-        "echo 'Attach to any window: tmux attach -t ${SESSION}'" Enter
+        "echo 'Detach with Ctrl-B d — generation continues in background.'" Enter
     tmux send-keys -t "$SESSION:0" \
-        "echo 'List windows: Ctrl-B w'" Enter
+        "echo ''" Enter
+    tmux send-keys -t "$SESSION:0" \
+        "bash '$run_script'" Enter
 
-    local i=1
-    local port=8080
-    for name in "${!MODELS[@]}"; do
-        local gguf="${MODELS[$name]}"
-        [[ -f "$gguf" ]] || continue
-
-        local run_id="${RUN_ID_PREFIX}"
-
-        tmux new-window -t "$SESSION" -n "$name"
-        tmux send-keys -t "$SESSION:$i" \
-            "echo '=== ${name} | port ${port} | run ${run_id} ==='" Enter
-        tmux send-keys -t "$SESSION:$i" \
-            "cargo run --release -- generate -m '${name}' -p '${gguf}' --port ${port} -n ${ATTEMPTS} --run-id '${run_id}'" Enter
-
-        echo -e "  ${GREEN}win $i${NC}: ${name} (port ${port})"
-        ((i++))
-        ((port++))
-    done
-
+    echo -e "  ${BOLD}Started in tmux session '${SESSION}'${NC}"
     echo ""
-    echo -e "  ${BOLD}Commands:${NC}"
-    echo "    tmux attach -t ${SESSION}     # view progress"
-    echo "    Ctrl-B w                       # list windows"
-    echo "    Ctrl-B <n>                     # switch to window n"
-    echo ""
-    echo -e "  ${BOLD}Start ${PARALLEL} models at a time:${NC} enter each window and press Enter"
+    echo "  tmux attach -t ${SESSION}     # view progress"
+    echo "  Ctrl-B d                       # detach (keeps running)"
     echo ""
 
-    # Attach to session
     tmux attach -t "$SESSION"
 }
 
