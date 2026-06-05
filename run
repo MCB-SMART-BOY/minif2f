@@ -228,8 +228,8 @@ do_it_all() {
 
     scripts/setup.sh
     do_quality || { echo -e "${RED}Quality gates failed — aborting.${NC}"; return 1; }
-    do_build
-    scripts/generate-all.sh
+    do_build || { echo -e "${RED}Build failed — aborting.${NC}"; return 1; }
+    scripts/generate-all.sh || { echo -e "${RED}Generation failed.${NC}"; return 1; }
 }
 
 # ── Main ────────────────────────────────────────────────────────────

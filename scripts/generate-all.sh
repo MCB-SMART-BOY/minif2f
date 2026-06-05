@@ -132,7 +132,13 @@ RUNEOF
     echo "  Ctrl-B d                       # detach (keeps running)"
     echo ""
 
-    tmux attach -t "$SESSION"
+    # Only attach if running in a real terminal (not inside do_it_all pipeline)
+    if [[ -t 0 ]]; then
+        tmux attach -t "$SESSION"
+    else
+        echo "  (non-interactive — generation continues in background)"
+        echo "  Attach later: tmux attach -t ${SESSION}"
+    fi
 }
 
 main
