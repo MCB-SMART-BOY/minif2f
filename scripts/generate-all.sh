@@ -31,11 +31,12 @@ main() {
         fi
     done
 
-    # Build per-slot model lists (round-robin assignment)
-    # Slot 1 gets indices 0,2,4; Slot 2 gets indices 1,3,5
+    # Build per-slot model lists (round-robin, skip missing GGUF)
     local slot1_models=()
     local slot2_models=()
     for i in "${!MODELS[@]}"; do
+        IFS='|' read -r _ gguf <<< "${MODELS[$i]}"
+        if [[ ! -f "$gguf" ]]; then continue; fi
         if ((i % 2 == 0)); then
             slot1_models+=("${MODELS[$i]}")
         else
@@ -73,6 +74,10 @@ models=("$@")
 
 for entry in "${models[@]}"; do
     IFS='|' read -r name gguf <<< "$entry"
+    if [[ ! -f "$gguf" ]]; then
+        echo -e "${RED}[$SLOT] SKIP $name — GGUF not found${NC}"
+        continue
+    fi
     run_id="${RUN_ID_PREFIX}-${name}"
 
     echo ""
