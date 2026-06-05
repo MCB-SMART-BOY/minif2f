@@ -225,7 +225,12 @@ do_generate_all() {
         return 1
     fi
     echo ""
-    scripts/generate-all.sh || echo -e "  ${RED}Generation exited with code $?.${NC}"
+    bash -x scripts/generate-all.sh 2>&1 | tee /tmp/generate-all-debug.log || {
+        echo ""
+        echo -e "  ${RED}Generation exited with code $?.${NC}"
+        echo "  Debug log: /tmp/generate-all-debug.log (last 20 lines):"
+        tail -20 /tmp/generate-all-debug.log | sed 's/^/    /'
+    }
 }
 
 do_it_all() {
