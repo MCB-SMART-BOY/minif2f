@@ -32,6 +32,9 @@ enum Commands {
         /// Port for llama-server (use different ports for parallel runs)
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// Number of attempts per theorem [default: 128]
+        #[arg(short = 'n', long, default_value = "128")]
+        attempts: usize,
     },
     /// Generate report from existing results (not yet implemented)
     Report {
@@ -66,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             model_path,
             run_id,
             port,
+            attempts,
         } => {
             let model_cfg = find_model(&model).ok_or_else(|| {
                 anyhow::anyhow!("Model '{model}' not found. Use 'list-models' to see available.")
@@ -74,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
             let config = PipelineConfig {
                 project_root: PathBuf::from("."),
                 port,
+                completion_attempts: attempts,
                 ..PipelineConfig::default()
             };
 

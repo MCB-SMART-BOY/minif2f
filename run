@@ -247,7 +247,8 @@ main() {
     banner
 
     local actions=(
-        "Generate Proofs"
+        "Generate Proofs (single model)"
+        "Generate All Models (tmux, 6 models)"
         "Check Status"
         "List Models"
         "Quality Gates (fmt + clippy + test)"
@@ -259,10 +260,11 @@ main() {
 
     case "$idx" in
         0) do_generate ;;
-        1) do_status ;;
-        2) do_list_models ;;
-        3) do_quality ;;
-        4) do_build ;;
+        1) ./generate-all.sh ;;
+        2) do_status ;;
+        3) do_list_models ;;
+        4) do_quality ;;
+        5) do_build ;;
     esac
 }
 

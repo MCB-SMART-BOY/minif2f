@@ -60,6 +60,8 @@ impl EvaluationPipeline {
         let mut checkpoint =
             CheckpointManager::new(&self.config.checkpoint_dir(), &model_cfg.name, &self.run_id)?;
 
+        let n_attempts = self.config.completion_attempts;
+
         let pb = PromptBuilder::new(model_cfg.clone());
 
         let bar = ProgressBar::new(theorems.len() as u64);
@@ -74,23 +76,29 @@ impl EvaluationPipeline {
                 continue;
             }
 
-            // Build prompt → generate proof → extract clean Lean code
+            // Build prompt (reused across all attempts)
             let prompt = pb.build(theorem);
-            let texts = engine.generate_batch_retry(&prompt, 1, 0).await;
-            let raw = texts.first().map_or("", std::string::String::as_str);
-            let proof = pb.extract_proof(raw);
+            let mut attempts: BTreeMap<String, String> = BTreeMap::new();
 
-            // If model output contains imports, it's a complete Lean file — use directly.
-            // Otherwise wrap with theorem.make_proof_file() as fallback.
-            let lean_source = if proof.contains("import ") {
-                proof
-            } else {
-                theorem.make_proof_file(&proof)
-            };
+            // Generate n proofs (batched for efficiency)
+            for batch_start in (0..n_attempts).step_by(self.config.completion_attempts.min(8)) {
+                let batch_size = (n_attempts - batch_start).min(8);
+                let texts = engine
+                    .generate_batch_retry(&prompt, batch_size, batch_start)
+                    .await;
+                for (j, text) in texts.iter().enumerate() {
+                    let attempt_num = batch_start + j + 1; // 1-indexed
+                    let raw = text.as_str();
+                    let proof = pb.extract_proof(raw);
+                    let lean_source = if proof.contains("import ") {
+                        proof
+                    } else {
+                        theorem.make_proof_file(&proof)
+                    };
+                    attempts.insert(format!("attempt_{attempt_num}"), lean_source);
+                }
+            }
 
-            // Insert: theorem → { "attempt_1": proof }
-            let mut attempts = BTreeMap::new();
-            attempts.insert("attempt_1".to_string(), lean_source);
             results.insert(theorem.name.clone(), attempts);
 
             checkpoint.mark_done(&theorem.name)?;
