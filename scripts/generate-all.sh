@@ -123,7 +123,19 @@ RUNEOF
 
     # Create tmux session (sets working directory to project root)
     tmux kill-session -t "$SESSION" 2>/dev/null || true
-    tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -n "generate-all"
+
+    if ! tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -n "generate-all" 2>/tmp/tmux-err.log; then
+        echo ""
+        echo -e "  ${RED}Failed to create tmux session.${NC}"
+        echo "  tmux error:"
+        sed 's/^/    /' /tmp/tmux-err.log
+        echo ""
+        echo "  Troubleshooting:"
+        echo "    1. Check tmux is running: tmux ls"
+        echo "    2. Try manually: tmux new-session -d -s test"
+        echo "    3. Run without tmux: cargo run --release -- generate -m <model> -p <gguf>"
+        exit 1
+    fi
 
     tmux send-keys -t "$SESSION:0" "echo 'Sequential: one model at a time. Ctrl-B d to detach.'" Enter
     tmux send-keys -t "$SESSION:0" "echo ''" Enter
