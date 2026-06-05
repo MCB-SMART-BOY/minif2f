@@ -8,7 +8,7 @@ Generate theorem proofs for [miniF2F](https://github.com/openai/miniF2F) (488 th
 
 ```bash
 # New machine: one-command setup
-./setup.sh
+./scripts/setup.sh
 
 # Generate proofs (interactive menu)
 ./run
@@ -24,7 +24,7 @@ cargo run -- status --run-id v1
 
 ```
 Setup (one-time)  →  Generate (per model)  →  JSON Output
-./setup.sh           ./run → Generate         output/<model>.json
+./scripts/setup.sh           ./run → Generate         output/<model>.json
 ```
 
 ## Commands

@@ -260,7 +260,7 @@ main() {
 
     case "$idx" in
         0) do_generate ;;
-        1) ./generate-all.sh ;;
+        1) ./scripts/generate-all.sh ;;
         2) do_status ;;
         3) do_list_models ;;
         4) do_quality ;;
