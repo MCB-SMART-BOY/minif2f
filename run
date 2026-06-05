@@ -197,6 +197,9 @@ do_generate_single() {
     echo -e "  ${BOLD}Summary:${NC}"
     echo -e "    Model:     ${CYAN}${model_name}${NC}"
     echo -e "    Theorems:  488"
+    echo -e "    Attempts:  128 (default)"
+    echo -e "    Port:      8080 (default)"
+    echo -e "    Parallel:  8 (default)"
     echo -e "    Output:    output/${model_name}.json"
 
     if ! confirm "Start generation?"; then
