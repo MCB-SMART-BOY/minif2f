@@ -200,7 +200,8 @@ do_generate_single() {
     echo -e "    Attempts:  128 (default)"
     echo -e "    Port:      8080 (default)"
     echo -e "    Parallel:  8 (default)"
-    echo -e "    Output:    output/${model_name}.json"
+    echo -e "    Output:    output/raw_output/${model_name}.json"
+    echo -e "               output/lean_code/${model_name}.json"
 
     if ! confirm "Start generation?"; then
         echo "  Canceled."
@@ -213,7 +214,8 @@ do_generate_single() {
     cargo run --release -- generate -m "$model_name" -p "$gguf" --run-id "$run_id"
 
     echo ""
-    echo -e "  Output: ${BOLD}output/${model_name}.json${NC}"
+    echo -e "  Raw output:  ${BOLD}output/raw_output/${model_name}.json${NC}"
+    echo -e "  Lean code:   ${BOLD}output/lean_code/${model_name}.json${NC}"
 }
 
 do_generate_all() {
@@ -269,7 +271,7 @@ main() {
         "Build Project"
         "Check Status"
         "Generate Proofs (single model)"
-        "Generate All Models (tmux, 2 parallel, auto-queue, 128 attempts)"
+        "Generate All Models (tmux, sequential, 128 attempts, auto-retry)"
         "Do It All (setup → quality → build → generate all)"
     )
 

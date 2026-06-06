@@ -37,11 +37,25 @@ impl InferenceEngine {
                 "-ngl",
                 "99",
                 "--ctx-size",
-                &config.max_model_len.to_string(),
+                &{
+                    // Each slot needs prompt + max_tokens (capped at model training limit).
+                    // llama-server divides ctx-size by --parallel: per_slot = ctx / parallel.
+                    // So: ctx = per_slot_needed * parallel
+                    let per_slot = (config.max_tokens + 4096).min(config.max_model_len);
+                    (per_slot * parallel).to_string()
+                },
                 "--batch-size",
-                "256",
+                "2048",
                 "--parallel",
                 &parallel.to_string(),
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--cache-reuse",
+                "256",
+                "--flash-attn",
+                "on",
                 "--no-warmup",
                 "--api-key",
                 "minif2f",

@@ -1,6 +1,7 @@
 use crate::config::ModelConfig;
 use crate::data::Theorem;
 
+#[derive(Clone)]
 pub struct PromptBuilder {
     pub config: ModelConfig,
 }
@@ -19,29 +20,56 @@ impl PromptBuilder {
 
         match arch.as_str() {
             // ── Qwen3 ChatML — Kimina-Prover, Goedel-Prover-V2 ──────────
-            // Kimina-Prover was RL-trained with a format reward requiring:
-            //   <think>reasoning + optional Lean snippets</think>
-            //   ```lean4
-            //   complete proof
-            //   ```
-            // We let the model generate <think> naturally; do NOT prepopulate
-            // an empty think block — that breaks the reasoning chain.
-            "qwen3" => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-                self.config.system_prompt, user
-            ),
+            // Official Goedel-V2: user message only, no system prompt.
+            // Kimina models: system + user.
+            "qwen3" => {
+                if self.config.system_prompt.is_empty() {
+                    format!(
+                        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                        user
+                    )
+                } else {
+                    format!(
+                        "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                        self.config.system_prompt, user
+                    )
+                }
+            }
 
             // ── DeepSeek V2 — Unicode fullwidth ｜ ────────────────────────
+            // NOTE: BOS (<｜begin▁of▁sentence｜>) is added automatically by
+            // llama-server via tokenizer config (add_bos_token).  Including it
+            // here produces a double BOS and a warning at every request.
             "deepseek_v2" => format!(
-                "<｜begin▁of▁sentence｜>{}<｜User｜>{}<｜Assistant｜>",
+                "{}<｜User｜>{}<｜Assistant｜>",
                 self.config.system_prompt, user
             ),
 
             // ── DeepSeek Coder / V1 — ### Instruction: / ### Response: ───
-            "deepseek_coder" => format!(
-                "{}### Instruction:\n{}\n### Response:\n",
-                self.config.system_prompt, user
-            ),
+            // Goedel-Prover-DPO: prepopulate response with ```lean4 + header
+            // so the model generates proof code inside the block.
+            // CRITICAL: strip trailing ``` from the prepopulated content.
+            // If the model sees a closed ```lean4 block, it outputs EOS or
+            // English prose instead of Lean tactics (72% empty in testing).
+            "deepseek_coder" => {
+                if self.config.prompt_format == "simple" {
+                    let prepop = user.split("```lean4\n").nth(1).unwrap_or("").trim_end();
+                    // Strip closing ``` so model continues inside open code block
+                    let prepop = prepop.strip_suffix("```").unwrap_or(prepop).trim_end();
+                    format!(
+                        "{}### Instruction:\n{}\n### Response:\n```lean4\n{}",
+                        self.config.system_prompt, user, prepop
+                    )
+                } else {
+                    format!(
+                        "{}### Instruction:\n{}\n### Response:\n",
+                        self.config.system_prompt, user
+                    )
+                }
+            }
+
+            // ── Raw — no chat template (STP model: trained on raw Lean) ──
+            "raw" => user,
 
             // ── Generic fallback ──────────────────────────────────────────
             _ => format!(
@@ -56,12 +84,14 @@ impl PromptBuilder {
         match fmt.as_str() {
             "goedel_v2" => Self::build_goedel_v2(theorem),
             "simple" => Self::build_simple(theorem),
+            "deepseek_prover" => Self::build_deepseek_prover(theorem),
             _ => Self::build_kimina(theorem), // default: kimina format
         }
     }
 
-    /// Kimina format (official): "Think about and solve the following problem step by step in Lean 4."
-    /// The model is expected to output `<think>...</think>` followed by ` ```lean4 ` block.
+    /// Kimina format (official): "Think about and solve the following problem
+    /// step by step in Lean 4." Model expected to output `<think>...</think>`
+    /// followed by a ```lean4 block.
     fn build_kimina(theorem: &Theorem) -> String {
         use std::fmt::Write;
 
@@ -80,15 +110,15 @@ impl PromptBuilder {
         let mut msg =
             "Think about and solve the following problem step by step in Lean 4.".to_string();
         if !problem_desc.is_empty() {
-            let _ = write!(msg, "\n# Problem: {problem_desc}");
+            let _ = write!(msg, "\n# Problem:{problem_desc}");
         }
         let _ = write!(msg, "\n# Formal statement:\n```lean4\n{formal_block}\n```");
         msg
     }
 
     /// Goedel V2 / DeepSeek Prover V2 format (official):
-    /// "Complete the following Lean 4 code: ... provide a detailed proof plan ..."
-    /// The formal statement includes `sorry` as a placeholder — matching official format.
+    /// "Complete the following Lean 4 code: ..." with `sorry` placeholder,
+    /// preceded by a proof plan request. Model outputs proof plan + code.
     fn build_goedel_v2(theorem: &Theorem) -> String {
         let mut parts: Vec<&str> = vec![];
         if !theorem.header.is_empty() {
@@ -99,11 +129,10 @@ impl PromptBuilder {
         }
         parts.push(&theorem.formal_statement);
         let formal_block = parts.join("\n");
-        // Add `sorry` placeholder matching official Goedel/DeepSeek format
         let formal_with_sorry = format!("{formal_block}\n  sorry");
 
         format!(
-            "Complete the following Lean 4 code:\n\n```lean4\n{formal_with_sorry}\n```\n\n\
+            "Complete the following Lean 4 code:\n\n```lean4\n{formal_with_sorry}```\n\n\
              Before producing the Lean 4 code to formally prove the given theorem, provide \
              a detailed proof plan outlining the main proof steps and strategies.\n\
              The plan should highlight key ideas, intermediate lemmas, and proof structures \
@@ -111,8 +140,9 @@ impl PromptBuilder {
         )
     }
 
-    /// Simple format (DeepSeek Coder, Goedel-DPO, STP): plain theorem statement.
-    /// Includes `sorry` placeholder matching official format.
+    /// Goedel-Prover-DPO format (DeepSeek Coder chat):
+    /// The chat template prepopulates ### Response with ```lean4 + theorem.
+    /// Model generates proof code inside the block, then closes it with ```.
     fn build_simple(theorem: &Theorem) -> String {
         let mut parts: Vec<&str> = vec![];
         if !theorem.header.is_empty() {
@@ -123,21 +153,44 @@ impl PromptBuilder {
         }
         parts.push(&theorem.formal_statement);
         let formal_block = parts.join("\n");
-        // Add `sorry` placeholder
-        let formal_with_sorry = format!("{formal_block}\n  sorry");
 
+        // Return just the code block content — the chat template wraps it
         format!(
-            "This is a theorem written in Lean 4. Please complete the corresponding proof code to formalize the argument:\n\n{formal_with_sorry}"
+            "Complete the following Lean 4 code with explanatory comments preceding each line of code:\n\n```lean4\n{formal_block}\n```"
         )
     }
 
-    /// Extract the complete Lean file from model output.
+    /// STP model format (official eval script):
+    /// Completion (NOT chat). "Complete the following Lean 4 code:" + ```lean4.
+    /// Statement = formal_statement with last "sorry" stripped.
+    /// Informal prefix is excluded — STP max_model_len is only 1024.
+    /// Model generates Lean tactics from `:= by`.
+    fn build_deepseek_prover(theorem: &Theorem) -> String {
+        // Strip trailing "sorry" (official: rsplit("sorry", 1)[0].strip()).
+        // No-op for minif2f data (no "sorry" in formal_statements).
+        let statement = match theorem.formal_statement.rsplit_once("sorry") {
+            Some((before, _)) => before.trim().to_string(),
+            None => theorem.formal_statement.clone(),
+        };
+
+        let mut parts: Vec<&str> = vec![];
+        if !theorem.header.is_empty() {
+            parts.push(&theorem.header);
+        }
+        // NOTE: informal_prefix is intentionally excluded — STP has 1024 ctx
+        parts.push(&statement);
+        let formal_block = parts.join("\n");
+
+        format!("Complete the following Lean 4 code:\n\n```lean4\n{formal_block}\n```")
+    }
+
+    /// Extract the proof body from model output.
     ///
     /// Strategy (prioritised):
-    /// 1. Find ```lean4 block after </think> — the primary output format for Kimina
-    /// 2. For non-think architectures, find any ```lean4 block
-    /// 3. Validate that the extracted code has actual proof content (not just header)
-    /// 4. Fallback: strip think blocks and chat tokens, return raw text
+    /// 1. Find ```lean4 block after </think> — primary format for Kimina
+    /// 2. Fallback: any ```lean4 block in raw text
+    /// 3. Fallback: extract Lean tactics from raw text (no fenced block)
+    /// 4. Last resort: strip think/chat/markdown, validate body exists
     #[must_use]
     pub fn extract_proof(&self, raw: &str) -> String {
         // Find the ```lean4 block AFTER </think> (if present)
@@ -160,16 +213,72 @@ impl PromptBuilder {
             }
         }
 
-        // Second fallback: try to extract Lean code from the raw text
+        // Third fallback: try to extract Lean code from raw text
         // (model might have output the proof without proper fencing)
         if let Some(code) = extract_lean_from_text(raw) {
-            return code;
+            let cleaned = strip_chat_tokens(&code);
+            if has_proof_body(&cleaned) {
+                return cleaned;
+            }
         }
 
-        // Last resort: return raw text (stripped of think blocks, chat tokens, and markdown)
+        // Last resort: strip think/chat/markdown, validate proof body
         let text = strip_think_blocks(raw);
         let cleaned = strip_chat_tokens(&text);
-        strip_markdown_from_proof(&cleaned)
+        let stripped = strip_markdown_from_proof(&cleaned);
+        if has_proof_body(&stripped) {
+            strip_trailing_fence(&stripped)
+        } else {
+            String::new()
+        }
+    }
+    /// Validate that assembled lean_code is a complete Lean proof file.
+    /// Returns true if the code looks compilable (has tactics, no `sorry`,
+    /// no markdown/chat artefacts).
+    #[must_use]
+    pub fn validate_lean_code(&self, code: &str) -> bool {
+        if code.is_empty() {
+            return false;
+        }
+        // Must contain := by
+        if !code.contains(":= by") {
+            return false;
+        }
+        // Must NOT contain sorry
+        if code.contains("sorry") {
+            return false;
+        }
+        // Must have tactics after := by
+        if let Some(pos) = code.find(":= by") {
+            let after = &code[pos + ":=".len() + " by".len()..];
+            let body = after.trim();
+            if body.len() < 2 {
+                return false;
+            }
+            // Reject markdown artefacts in proof body
+            if body.contains("```") || body.contains("**") {
+                return false;
+            }
+            // Reject chat tokens
+            if body.contains("<|im_start|>")
+                || body.contains("<|im_end|>")
+                || body.contains("<｜User｜>")
+                || body.contains("<｜Assistant｜>")
+            {
+                return false;
+            }
+            // Reject natural language commentary (not Lean tactics)
+            if !is_proof_body(body) {
+                return false;
+            }
+            // Strip block comments (/- ... -/) — if nothing remains,
+            // the model generated only commentary, no actual tactics.
+            let without_comments = strip_block_comments(body);
+            if without_comments.trim().len() < 2 {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -222,21 +331,63 @@ fn extract_fenced_code(text: &str) -> Option<String> {
     best
 }
 
+/// Check if the text looks like a proof body (starts with tactic-like content,
+/// not another theorem/definition/import statement or natural language commentary).
+fn is_proof_body(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    // Reject theorem/lemma/import headers
+    if matches!(
+        first_word,
+        "theorem" | "lemma" | "import" | "open" | "set_option" | "noncomputable" | "variable"
+    ) {
+        return false;
+    }
+    if trimmed.starts_with("```") {
+        return false;
+    }
+    // Reject natural language commentary: first word is English prose starter
+    // with capital letter, and the line has many words (prose) vs few (tactics).
+    if let Some(first_char) = first_word.chars().next() {
+        if first_char.is_ascii_uppercase() {
+            let word_count = trimmed.split_whitespace().count();
+            // Lean comments: "-- ..." or "/- ... -/"
+            // Prose commentary: "The product of ..." (many words, natural language)
+            if word_count > 4 && !trimmed.starts_with("--") && !trimmed.starts_with("/-") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Check if code has actual proof content beyond the theorem header.
 fn has_proof_body(code: &str) -> bool {
     let stripped = strip_theorem_header(code);
-    // Even a single tactic like `rfl` is a valid proof
-    stripped.trim().len() >= 2
+    let trimmed = stripped.trim();
+    // Reject empty, fence-only, backtick-only, or markdown artefacts
+    if trimmed.len() < 2 || trimmed.starts_with('`') {
+        return false;
+    }
+    // Reject natural language commentary (model explains the proof instead of
+    // writing Lean tactics).  Commentary starts with an English sentence
+    // (capital letter + many prose words).  Valid Lean tactics are lowercase
+    // or symbols.  Lean comments (--, /-) are allowed through.
+    if !is_proof_body(trimmed) {
+        return false;
+    }
+    true
 }
 
 /// Strip markdown commentary lines from extracted proof code.
-/// The model sometimes outputs markdown headers/comments mixed with Lean code.
 fn strip_markdown_from_proof(code: &str) -> String {
     let lines: Vec<&str> = code
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            // Filter out markdown headers and obvious commentary
             !trimmed.starts_with("# ") && !trimmed.starts_with("## ") && !trimmed.starts_with("**")
         })
         .collect();
@@ -244,52 +395,76 @@ fn strip_markdown_from_proof(code: &str) -> String {
 }
 
 /// Try to extract Lean proof code from raw text (no fenced block found).
-/// Looks for patterns like `:= by\n  ...` or tactic blocks.
+/// Looks for `:= by` followed by indented tactic lines.
 fn extract_lean_from_text(text: &str) -> Option<String> {
-    // Look for a theorem-like pattern with tactics after := by
     if let Some(pos) = text.find(":= by") {
         let after = &text[pos + ":=".len() + " by".len()..];
-        let tactics: String = after
+        let lines: Vec<&str> = after.lines().collect();
+
+        // Skip leading blank lines after `:= by`
+        let start_idx = lines.iter().position(|l| !l.trim().is_empty())?;
+
+        // Collect tactic lines — stop at blank line or new definition
+        let mut tactics: Vec<&str> = Vec::new();
+        for &line in &lines[start_idx..] {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            // Stop at new theorem/lemma/definition boundaries
+            if trimmed.starts_with("theorem ")
+                || trimmed.starts_with("lemma ")
+                || trimmed.starts_with("import ")
+            {
+                break;
+            }
+            // Accept indented lines and common continuation patterns.
+            // `line.starts_with(' ')` checks the RAW line (before trim) —
+            // this preserves indented tactics that `trimmed.starts_with("  ")` would miss.
+            if line.starts_with(' ')
+                || line.starts_with('\t')
+                || trimmed.starts_with("·")
+                || trimmed.starts_with('.')
+                || trimmed.starts_with("--")
+            {
+                tactics.push(line);
+            } else if tactics.is_empty() {
+                // First non-indented line — accept short tactics (e.g. `rfl`, `simp_all`)
+                tactics.push(line);
+            } else {
+                break;
+            }
+        }
+
+        let tactics_str = tactics.join("\n").trim().to_string();
+        if tactics_str.is_empty() {
+            return None;
+        }
+
+        // Reconstruct context: find the theorem statement leading up to `:= by`
+        let before = &text[..pos + ":=".len() + " by".len()];
+        let clean_before: Vec<&str> = before
             .lines()
-            .take_while(|line| {
-                let trimmed = line.trim();
-                !trimmed.is_empty()
-                    && (trimmed.starts_with("  ")
-                        || trimmed.starts_with('\t')
-                        || trimmed.starts_with("·")
-                        || trimmed.starts_with('.')
-                        || trimmed.starts_with("--"))
-            })
+            .rev()
+            .skip_while(|l| l.trim().is_empty())
+            .collect();
+        let context_start = clean_before
+            .iter()
+            .enumerate()
+            .rfind(|(_, l)| l.contains("import ") || l.contains("theorem "))
+            .map(|(i, _)| clean_before.len() - i - 1)
+            .unwrap_or(0);
+
+        let context = clean_before
+            .iter()
+            .rev()
+            .take(clean_before.len() - context_start)
+            .rev()
+            .copied()
             .collect::<Vec<_>>()
             .join("\n");
 
-        if !tactics.trim().is_empty() {
-            // Reconstruct: find the full theorem context
-            let before = &text[..pos + ":=".len() + " by".len()];
-            // Find the start of the theorem (from the last import/empty line before)
-            let clean_before = before
-                .lines()
-                .rev()
-                .skip_while(|l| l.trim().is_empty())
-                .collect::<Vec<_>>();
-            let context_start = clean_before
-                .iter()
-                .enumerate()
-                .find(|(_, l)| l.contains("import ") || l.contains("theorem "))
-                .map(|(i, _)| clean_before.len() - i - 1)
-                .unwrap_or(0);
-
-            let context: String = clean_before
-                .iter()
-                .rev()
-                .take(clean_before.len() - context_start)
-                .rev()
-                .copied()
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            return Some(format!("{context}\n  {tactics}"));
-        }
+        return Some(format!("{context}\n  {tactics_str}"));
     }
     None
 }
@@ -314,6 +489,65 @@ fn strip_think_blocks(text: &str) -> String {
         }
     }
     result
+}
+
+/// Strip Lean block comments (/- ... -/) from proof body.
+/// Returns the text with all block comments removed.
+fn strip_block_comments(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if c == '/' {
+            // Peek ahead for "/-"
+            let mut lookahead = chars.clone();
+            if let Some((_, '-')) = lookahead.next() {
+                // Found "/-", skip until "-/"
+                chars = lookahead;
+                let mut depth: u32 = 1;
+                while let Some((_, ch)) = chars.next() {
+                    if ch == '-' {
+                        let mut la2 = chars.clone();
+                        if let Some((_, '/')) = la2.next() {
+                            depth = depth.saturating_sub(1);
+                            chars = la2;
+                            if depth == 0 {
+                                break;
+                            }
+                        } else {
+                            result.push('-');
+                            result.push(ch);
+                        }
+                    } else if ch == '/' {
+                        let mut la2 = chars.clone();
+                        if let Some((_, '-')) = la2.next() {
+                            depth = depth.saturating_add(1);
+                            chars = la2;
+                        } else {
+                            result.push(ch);
+                        }
+                    } else {
+                        // keep scanning inside comment
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Strip trailing ``` (code fence closer) from proof body.
+/// Open code block formats (Goedel-DPO, STP) let the model generate
+/// inside the block; the model may close it with ```.
+fn strip_trailing_fence(text: &str) -> String {
+    text.trim_end()
+        .strip_suffix("```")
+        .map(str::trim_end)
+        .unwrap_or(text)
+        .to_string()
 }
 
 fn strip_chat_tokens(text: &str) -> String {
@@ -345,18 +579,25 @@ fn strip_chat_tokens(text: &str) -> String {
     s
 }
 
+/// Strip the theorem header — returns only the proof body.
+///
+/// Uses `find` (first occurrence) rather than `rfind` so that nested
+/// `have ... := by` blocks inside the proof are preserved intact.
 fn strip_theorem_header(code: &str) -> String {
-    // Use rfind (last occurrence) — the model often outputs the theorem
-    // statement inside a code fence followed by actual proof code.
-    if let Some(pos) = code.rfind(":= by\n") {
-        return code[pos + ":=".len() + " by\n".len()..].trim().to_string();
+    if let Some(pos) = code.find(":= by\n") {
+        let after = &code[pos + ":=".len() + " by\n".len()..];
+        let trimmed = after.trim();
+        if is_proof_body(trimmed) {
+            return trimmed.to_string();
+        }
     }
-    if let Some(pos) = code.rfind(":= by") {
+    if let Some(pos) = code.find(":= by") {
         let after_pos = pos + ":=".len();
         let rest = code[after_pos..].trim();
-        // Remove leading "by" (with optional space)
         let after_by = rest.strip_prefix("by").map_or("", str::trim);
-        return after_by.to_string();
+        if !after_by.is_empty() && is_proof_body(after_by) {
+            return after_by.to_string();
+        }
     }
     code.to_string()
 }
@@ -391,6 +632,8 @@ mod tests {
         assert!(prompt.contains("<|im_start|>user"));
         // Qwen3: no pre-populated think block — model generates it naturally
         assert!(!prompt.contains("<think>"));
+        // Official: # Problem:{desc} — no space after colon
+        assert!(prompt.contains("# Problem:The sum of two even numbers is even"));
     }
 
     #[test]
@@ -402,9 +645,14 @@ mod tests {
         assert!(prompt.contains("Complete the following Lean 4 code"));
         assert!(prompt.contains("proof plan"));
         assert!(prompt.contains("import Mathlib"));
-        assert!(prompt.contains("<|im_start|>system"));
-        // Goedel-V2 format includes `sorry` placeholder
         assert!(prompt.contains("sorry"));
+        // Official: user message only, no system prompt
+        assert!(!prompt.contains("<|im_start|>system"));
+        // Official: closing ``` on same line as last content line, not on new line
+        assert!(
+            prompt.contains("sorry```"),
+            "closing ``` must be on same line"
+        );
     }
 
     #[test]
@@ -413,12 +661,16 @@ mod tests {
         let pb = PromptBuilder::new(cfg);
         let t = make_theorem();
         let prompt = pb.build(&t);
-        assert!(prompt.contains("This is a theorem written in Lean 4"));
+        // DeepSeek Coder chat format with prepopulated response code block
         assert!(prompt.contains("### Instruction:"));
         assert!(prompt.contains("### Response:"));
+        assert!(prompt.contains("Complete the following Lean 4 code with explanatory comments"));
+        assert!(prompt.contains("import Mathlib"));
         assert!(prompt.contains("theorem test_thm"));
-        // Simple format includes `sorry` placeholder
-        assert!(prompt.contains("sorry"));
+        // Response prepopulates ```lean4 + theorem — model continues inside
+        assert!(prompt.contains("### Response:\n```lean4\nimport Mathlib"));
+        // No `sorry` in minif2f data
+        assert!(!prompt.contains("sorry"));
     }
 
     #[test]
@@ -427,12 +679,42 @@ mod tests {
         let pb = PromptBuilder::new(cfg);
         let t = make_theorem();
         let prompt = pb.build(&t);
-        assert!(prompt.contains("<｜begin▁of▁sentence｜>"));
+        // BOS (<｜begin▁of▁sentence｜>) is NOT in the template —
+        // llama-server adds it automatically via tokenizer config.
         assert!(prompt.contains("<｜User｜>"));
         assert!(prompt.contains("<｜Assistant｜>"));
         assert!(prompt.contains("Complete the following Lean 4 code"));
-        // DeepSeek V2 format includes `sorry` placeholder
         assert!(prompt.contains("sorry"));
+    }
+
+    #[test]
+    fn test_deepseek_prover_format() {
+        let cfg = crate::models::find_model("stp-model-lean").unwrap();
+        let pb = PromptBuilder::new(cfg);
+        let t = make_theorem();
+        let prompt = pb.build(&t);
+        // STP uses raw architecture — no chat template, no system prompt
+        assert!(!prompt.contains("### Instruction:"));
+        assert!(!prompt.contains("<|im_start|>"));
+        assert!(!prompt.contains("System:"));
+        // Should use "Complete the following Lean 4 code" format
+        assert!(prompt.contains("Complete the following Lean 4 code"));
+        assert!(prompt.contains("import Mathlib"));
+        assert!(prompt.contains("theorem test_thm"));
+        // STP format: NO `sorry` — model generates from `:= by`
+        assert!(!prompt.contains("sorry"));
+        // informal_prefix is excluded — STP has only 1024 ctx
+        assert!(!prompt.contains("sum of two even"));
+        // STP is a completion model: closing ``` on own line lets it generate
+        // Lean tactics after the code block. Same-line closing confuses the model.
+    }
+
+    #[test]
+    fn test_stp_raw_no_chat_template() {
+        let cfg = crate::models::find_model("stp-model-lean").unwrap();
+        assert_eq!(cfg.architecture, "raw");
+        assert_eq!(cfg.prompt_format, "deepseek_prover");
+        assert_eq!(cfg.system_prompt, "");
     }
 
     // ── Proof extraction tests ─────────────────────────────────────────
@@ -467,7 +749,6 @@ mod tests {
         let proof = pb.extract_proof(raw);
         assert!(proof.contains("theorem foo"));
         assert!(proof.contains("rfl"));
-        // Chat tokens should be stripped
         assert!(!proof.contains("<|im_end|>"));
     }
 
@@ -489,7 +770,7 @@ mod tests {
         // Only header, no actual proof body
         let raw = "<think>\n\n</think>\n\n```lean4\nimport Mathlib\nopen Nat\n\ntheorem foo : 1 = 1 := by\n```\n\n# Some markdown commentary";
         let proof = pb.extract_proof(raw);
-        // Should fall back to extracting from raw text (stripping think blocks and chat tokens)
+        // Should fall back to raw text (stripped of think blocks, chat tokens, markdown)
         // The header-only code block is rejected because has_proof_body returns false
         assert!(!proof.contains("# Some markdown commentary"));
     }
@@ -503,5 +784,129 @@ mod tests {
         let proof = pb.extract_proof(raw);
         assert!(!proof.contains("# This is markdown"));
         assert!(proof.contains("rfl"));
+    }
+
+    #[test]
+    fn test_extract_preserves_have_proof_body() {
+        // Regression: rfind shredded proof bodies that contained `have ... := by`
+        let cfg = crate::models::find_model("kimina-prover-rl-1.7b").unwrap();
+        let pb = PromptBuilder::new(cfg);
+        let raw = "```lean4\nimport Mathlib\ntheorem foo (a b : Nat) (h : a = b) : a + 1 = b + 1 := by\n  have h₁ : a + 1 = b + 1 := by\n    rw [h]\n  exact h₁\n```";
+        let proof = pb.extract_proof(raw);
+        assert!(proof.contains("have h₁"));
+        assert!(proof.contains("rw [h]"));
+        assert!(proof.contains("exact h₁"));
+    }
+
+    #[test]
+    fn test_strip_theorem_header_preserves_have_block() {
+        // find (not rfind) preserves nested `have ... := by`
+        let code =
+            "import Mathlib\ntheorem foo : bar := by\n  have h₁ : x = y := by\n    rfl\n  rw [h₁]";
+        let stripped = strip_theorem_header(code);
+        assert!(stripped.contains("have h₁"));
+        assert!(stripped.contains("rw [h₁]"));
+        assert!(!stripped.contains("theorem foo"));
+    }
+
+    #[test]
+    fn test_accepts_short_tactic_rw() {
+        // Short tactics like `rw` (2 chars) are valid proof bodies
+        let cfg = crate::models::find_model("kimina-prover-rl-1.7b").unwrap();
+        let pb = PromptBuilder::new(cfg);
+        let raw = "```lean4\nimport Mathlib\ntheorem foo : 1 = 1 := by rw\n```";
+        let proof = pb.extract_proof(raw);
+        assert!(proof.contains("rw"));
+        assert!(!proof.is_empty());
+    }
+
+    #[test]
+    fn test_has_proof_body_rejects_markdown() {
+        // Code that's just a markdown fence should be rejected
+        assert!(!has_proof_body("```"));
+        assert!(!has_proof_body("``"));
+        assert!(!has_proof_body("\n\n"));
+        // But actual proof content should pass
+        assert!(has_proof_body("theorem foo : 1 = 1 := by\n  rfl"));
+        assert!(has_proof_body("rw [h]"));
+    }
+
+    #[test]
+    fn test_strip_block_comments() {
+        assert_eq!(strip_block_comments("  rfl"), "  rfl");
+        assert_eq!(strip_block_comments("/- comment -/"), "");
+        assert_eq!(strip_block_comments("/- comment -/ rfl"), " rfl");
+        // Nested comments
+        assert_eq!(
+            strip_block_comments("/- outer /- inner -/ still outer -/ after"),
+            " after"
+        );
+    }
+
+    #[test]
+    fn test_validate_lean_code_rejects_commentary_only() {
+        let cfg = crate::models::find_model("goedel-prover-dpo").unwrap();
+        let pb = PromptBuilder::new(cfg);
+        // Just a comment, no tactics
+        assert!(!pb.validate_lean_code(
+            "import Mathlib\ntheorem foo : 1 = 1 := by\n  /- a comment explaining the proof -/"
+        ));
+        // Comment + actual tactic
+        assert!(pb.validate_lean_code(
+            "import Mathlib\ntheorem foo : 1 = 1 := by\n  /- trivial -/\n  rfl"
+        ));
+        // Only tactics
+        assert!(pb.validate_lean_code("import Mathlib\ntheorem foo : 1 = 1 := by\n  rfl"));
+        // Has sorry — reject
+        assert!(!pb.validate_lean_code("import Mathlib\ntheorem foo : 1 = 1 := by\n  sorry"));
+    }
+
+    #[test]
+    fn test_is_proof_body_rejects_commentary() {
+        // Natural language commentary that the model might generate
+        assert!(!is_proof_body(
+            "The product of the first seven odd numbers modulo 10 equals 5"
+        ));
+        assert!(!is_proof_body(
+            "This theorem can be proved by induction on n"
+        ));
+        assert!(!is_proof_body(
+            "We will use the triangle inequality to bound the sum"
+        ));
+        // Short uppercase text (might be a variable name or short statement)
+        assert!(is_proof_body("Nat.add_comm a b"));
+        assert!(is_proof_body("S : Type _"));
+        // Lean tactics (lowercase, symbols) always pass
+        assert!(is_proof_body("  rfl"));
+        assert!(is_proof_body("  nlinarith"));
+        assert!(is_proof_body("  rw [h]"));
+        // Comments pass
+        assert!(is_proof_body(
+            "-- This is a long explanatory comment about the proof"
+        ));
+        assert!(is_proof_body("/- multi-line\n   comment -/"));
+    }
+
+    #[test]
+    fn test_is_proof_body_detection() {
+        assert!(is_proof_body("  rfl"));
+        assert!(is_proof_body("  simp_all"));
+        assert!(is_proof_body("have h : x = y := by"));
+        assert!(is_proof_body("rw [h]"));
+        assert!(!is_proof_body("theorem foo : bar := by"));
+        assert!(!is_proof_body("lemma baz : qux := by"));
+        assert!(!is_proof_body("import Mathlib"));
+        assert!(!is_proof_body("```"));
+    }
+
+    #[test]
+    fn test_lean_fenced_block_with_tactics() {
+        let cfg = crate::models::find_model("kimina-prover-rl-1.7b").unwrap();
+        let pb = PromptBuilder::new(cfg);
+        let raw = "```lean4\nimport Mathlib\ntheorem foo : 1 = 1 := by\n  simp\n```";
+        let proof = pb.extract_proof(raw);
+        assert!(proof.contains("import Mathlib"));
+        assert!(proof.contains("simp"));
+        assert!(!proof.contains("```"));
     }
 }

@@ -5,9 +5,11 @@ metadata:
   type: project
 ---
 
-Generate 128 proof attempts for each of 488 miniF2F theorems using 6 Lean 4 theorem-proving LLMs. Output is nested JSON at `output/<model>.json`.
+Generate 128 proof attempts for each of 488 miniF2F theorems using 6 Lean 4 theorem-proving LLMs. Output is two-layer flat JSON at `output/raw_output/<model>.json` + `output/lean_code/<model>.json`.
 
 **Output format**: `{model: {theorem: {attempt_1...attempt_128: proof_string}}}`
+- `raw_output/`: unfiltered model completions
+- `lean_code/`: extracted + assembled Lean proofs
 
 **Scale**: 6 models × 488 theorems × 128 attempts = 374,784 proof generations.
 
@@ -15,4 +17,4 @@ Built as pure Rust CLI. Uses `llama-server` (C binary, managed as child process)
 
 **Why:** Pass@128 evaluation for 6 theorem-proving models. Architecture templates and prompt formats match each model's official HF configuration.
 
-**How to apply:** `./run → 8) Do It All` for full pipeline, or `./run` for step-by-step.
+**How to apply:** `./run → 8) Do It All` for full pipeline, or `./run` for step-by-step. Full architecture documented in `ARCHITECTURE.md`.

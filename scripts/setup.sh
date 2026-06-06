@@ -286,7 +286,7 @@ step_done() {
     echo "  cargo run --release -- list-models"
     echo "  cargo run --release -- status --run-id v1"
     echo ""
-    echo -e "  ${BOLD}Output:${NC} output/<model>.json"
+    echo -e "  ${BOLD}Output:${NC} output/raw_output/<model>.json + output/lean_code/<model>.json"
     echo ""
 }
 

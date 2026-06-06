@@ -1,8 +1,10 @@
-- [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem, 6 models, nested JSON output
-- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, llama-server GPU inference
-- [Pipeline Architecture](memory/pipeline-architecture.md) — Generate → validate → collect → JSON, checkpoint resume
-- [Model Registry](memory/model-registry.md) — 6 models, chat templates, `<think>` mode, GGUF status
-- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 23 tests
+- [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem, 6 models, two-layer JSON output, validate_lean_code gate
+- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, --parallel 48–128, KV cache q8_0 shared pool
+- [Pipeline Architecture](memory/pipeline-architecture.md) — buffer_unordered GPU → rayon par_iter CPU → validate → two-layer JSON, incremental writes
+- [Model Registry](memory/model-registry.md) — 6 models with official specs, 4 architectures, STP max_len=1024, Goedel-DPO deepseek_coder
+- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 34 tests (prompts:21 + models:6 + data:3 + checkpoint:4)
 - [Git Commit Style](memory/git-commit-style.md) — No Co-Authored-By lines in commits
 - [Kimina-Prover Think Mode](memory/kimina-prover-think-mode.md) — RL format reward requires `<think>`; empty think breaks model
 - [Checkpoint Resume Fix](memory/checkpoint-resume-fix.md) — Loads existing JSON on resume; no data loss
+- [Goedel-DPO Prompt Fix](memory/goedel-dpo-prompt-fix.md) — Trailing ``` in prepopulated response caused 72% empty outputs; strip it
+- [ARCHITECTURE.md](../ARCHITECTURE.md) — Full function-level architecture documentation (all 9 source files, end-to-end data flow)

@@ -1,6 +1,6 @@
 # minif2f — LLM Theorem Proof Generator
 
-Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/miniF2F)'s 488 theorems using 6 Lean 4 theorem-proving LLMs. Output is a nested JSON file per model.
+Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/miniF2F)'s 488 theorems using 6 Lean 4 theorem-proving LLMs. Output is two flat JSON files per model: raw output + extracted Lean code.
 
 **Stack**: Pure Rust + llama.cpp (inference). Zero Python at runtime.
 
@@ -26,7 +26,7 @@ Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/mini
 4) Build Project
 5) Check Status
 6) Generate Proofs (single model)
-7) Generate All Models (tmux background, sequential, 128 attempts)
+7) Generate All Models (tmux background, 2 parallel, 128 attempts)
 8) Do It All (setup → quality → build → generate all)
 ```
 
@@ -52,8 +52,14 @@ cargo run -- status --run-id <id>
 
 ## Output
 
+Two directories with flat JSON:
+
 ```
-output/<model>.json
+output/
+├── raw_output/
+│   └── <model>.json    # unfiltered model completions
+└── lean_code/
+    └── <model>.json    # extracted + assembled Lean proofs
 ```
 
 ```json
@@ -61,12 +67,16 @@ output/<model>.json
   "kimina-prover-rl-1.7b": {
     "amc12a_2019_p21": {
       "attempt_1": "import Mathlib\n...",
-      "attempt_2": "...",
       "attempt_128": "..."
     }
   }
 }
 ```
+
+- **raw_output**: unfiltered — exactly what the model generated
+- **lean_code**: `extract_proof()` → `make_proof_file()` → `validate_lean_code()` assembled code
+  - Header + statement from `data/raw/minif2f.jsonl`; proof body from model output
+  - Empty string if extraction failed OR validation rejected the proof
 
 ## Project Structure
 
@@ -74,7 +84,7 @@ output/<model>.json
 ├── run                    # Entry point (interactive menu)
 ├── scripts/
 │   ├── setup.sh           # One-time deployment
-│   └── generate-all.sh    # Sequential batch generation (tmux)
+│   └── generate-all.sh    # Sequential generation (tmux, single slot, 5 models)
 └── src/
     ├── main.rs            # CLI (clap)
     ├── lib.rs             # Modules
@@ -84,43 +94,44 @@ output/<model>.json
     ├── prompts.rs         # Chat templates + proof extraction
     ├── inference.rs       # llama-server manager
     ├── checkpoint.rs      # Crash recovery
-    └── pipeline.rs        # Orchestrator → JSON
+    └── pipeline.rs        # Orchestrator → two-layer JSON
 ```
 
 ## Supported Models
 
-| Model | Architecture | Chat Template | Prompt | ctx | Status |
-|-------|-------------|---------------|--------|-----|--------|
-| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 8192 | ✅ |
-| goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 8192 | ✅ |
-| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 8192 | ✅ |
-| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 8192 | ✅ |
-| goedel-prover-dpo | DeepSeek Coder | ### | simple | 4096 | ✅ |
-| stp-model-lean | DeepSeek Coder | ### | simple | 2048 | ✅ |
+| Model | Architecture | Chat Template | Prompt | ctx | max_tok |
+|-------|-------------|---------------|--------|-----|---------|
+| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 131K | 8096 |
+| goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 131K | 32768 |
+| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 32K | 8192 |
+| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 131K | 8096 |
+| goedel-prover-dpo | DeepSeek Coder | `###` | simple | 4096 | 2048 |
+| stp-model-lean | Raw | none | deepseek_prover | 1024 | 1024 |
 
 ## Design
 
 - **Deep thinking (Qwen3 models)**: Model generates `<think>reasoning</think>` naturally (RL-trained format reward). Empty think block breaks the model — removed after audit discovered 57.6% duplicate outputs.
-- **`sorry` placeholder**: Goedel-V2 and Simple formats include `sorry` in theorem statement, matching official HF prompt format.
-- **Proof extraction**: Multi-strategy with validation — rejects header-only code blocks, strips markdown commentary.
-- **Checkpoint resume**: Loads existing output JSON on startup, preserves prior results. No data loss on restart.
-- **Context**: 8192 for most models (HF official specs), 4096/2048 for DeepSeek Coder models
-- **Output**: Nested JSON `{model: {theorem: {attempt_N: proof}}}` — flat in `output/`
-- **128 attempts**: Default. Configurable via `-n`. Used for Pass@k evaluation
-- **Sequential generation**: One model at a time — loads, generates, unloads, next starts
-- **Slots**: `--parallel 8` (default), fits 5090 32GB. 8 concurrent requests per batch
+- **`sorry` placeholder**: Goedel-V2 format includes `sorry` in theorem statement, matching official HF prompt format. Kimina, Simple (Goedel-DPO), and STP formats do NOT include `sorry` — model generates from `:= by`.
+- **Proof extraction**: Multi-strategy with 8-layer validation — `find` (not `rfind`) preserves nested `have ... := by` blocks. `strip_block_comments()` rejects commentary-only proofs. `validate_lean_code()` ensures complete compilable Lean files.
+- **Checkpoint resume**: Loads existing raw_output + lean_code JSON on startup, merges tuples. Previously-completed theorems are not re-generated.
+- **Incremental writes**: JSON written every 20 theorems — crash resilience independent of checkpoint system.
+- **Two-layer output**: `output/raw_output/` (unfiltered) + `output/lean_code/` (extracted + validated). Same flat JSON format in both.
+- **STP model**: Raw architecture (no chat template), DeepSeek Prover format (no `sorry`, no informal_prefix). `max_model_len=1024`. Matches STP paper §3.1 exactly.
+- **128 attempts**: Default. Configurable via `-n`. Used for Pass@k evaluation.
+- **Sequential generation**: `generate-all.sh` runs models one at a time on port 8080 with per-model `--parallel` values (48–128). Single tmux session.
+- **GPU**: RTX 5090 32GB CUDA. KV cache q8_0 shared paged pool — `--parallel` does NOT linearly multiply VRAM.
 - **Crash recovery**: `results/checkpoints/<model>__<run_id>.json` — resume with `--run-id`
 
 ## Hardware
 
-- **GPU**: RTX 4060 8GB (Vulkan, `--parallel 2`) / RTX 5090 32GB (CUDA, `--parallel 8`)
+- **GPU**: RTX 4060 8GB (Vulkan, `--parallel 2`) / RTX 5090 32GB (CUDA, `--parallel 48–128`)
 - **1.7B FP16**: ~3.2 GB VRAM. **7-8B**: Q4_K_M GGUF ~4-5 GB
-- **Per theorem × 1**: ~25s. **488 × 128 × --parallel 8**: ~2.3 days/model
+- **KV cache**: q8_0 quantization, shared paged pool — `--parallel` does NOT linearly multiply VRAM
 
 ## Quality
 
 ```bash
 cargo fmt --check          ✅
 cargo clippy -- -D warnings  ✅
-cargo test                 ✅ 23/23
+cargo test                 ✅ 34/34
 ```
