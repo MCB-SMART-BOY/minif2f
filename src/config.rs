@@ -5,9 +5,9 @@ use std::path::PathBuf;
 pub struct ModelConfig {
     pub name: String,
     pub hf_repo: String,
-    /// `"qwen3"` | `"deepseek_v2"` | `"deepseek_coder"` | `"generic"`
+    /// Prompt wrapper: `"qwen3"` | `"deepseek_v2"` | `"deepseek_coder"` | `"raw"`
     pub architecture: String,
-    /// "kimina" | "`goedel_v2`" | "simple"
+    /// `"kimina"` | `"goedel_v2"` | `"simple"` | `"deepseek_prover"`
     pub prompt_format: String,
     pub param_count_b: Option<f64>,
     pub quantization: Option<String>,

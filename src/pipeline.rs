@@ -13,7 +13,7 @@ type AttemptMap = BTreeMap<String, (String, String)>;
 /// Theorem results: theorem name → attempt map.
 type ResultsMap = BTreeMap<String, AttemptMap>;
 
-/// Generates proofs for all 488 theorems and saves two nested JSON files:
+/// Generates proofs for all loaded theorems and saves two nested JSON files:
 ///   output/raw_output/<model>.json  — unfiltered model completions
 ///   output/lean_code/<model>.json   — extracted + assembled Lean proofs
 pub struct EvaluationPipeline {
@@ -32,7 +32,7 @@ impl EvaluationPipeline {
 
     /// Run the full generation pipeline for a single model.
     ///
-    /// Uses a continuous request pool: all 488×128 requests are submitted
+    /// Uses a continuous request pool: all theorem × attempt requests are submitted
     /// through a semaphore-controlled channel. Results flow as they arrive
     /// with NO per-theorem barrier — the GPU queue stays saturated.
     ///
@@ -163,7 +163,7 @@ impl EvaluationPipeline {
         //
         // buffer_unordered may interleave results from adjacent theorems,
         // so we accumulate each theorem's results in its own batch.
-        // When a batch reaches 128, parallel extraction via rayon frees
+        // When a batch reaches n_attempts, parallel extraction via rayon frees
         // the main loop to continue feeding the GPU.
 
         // Write JSON incrementally to prevent data loss on crash.

@@ -20,11 +20,12 @@ MODELS=(
   "kimina-prover-rl-1.7b|models/kimina-1.7b.gguf|24"                         # Qwen3-1.7B, ctx=292608, per_slot=12192
   "goedel-prover-v2-8b|models/goedel-prover-v2-8b.gguf|8"                    # Qwen3-8B, ctx=294912, per_slot=36864
   "kimina-prover-distill-8b|models/kimina-prover-distill-8b.gguf|24"         # Qwen3-8B, ctx=292608, per_slot=12192
+  "stp-model-lean|models/stp-model-lean.gguf|16"                             # DS-Prover-V1.5, ctx=16384, per_slot=1024
 )
 
 main() {
     echo -e "${BOLD}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║  Generate All 6 Models (${ATTEMPTS} attempts)  ║${NC}"
+    echo -e "${BOLD}║  Generate Models (${ATTEMPTS} attempts)  ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
     echo ""
 
@@ -43,7 +44,7 @@ main() {
         if [[ -f "$gguf" ]]; then ready=$((ready + 1)); fi
     done
     echo "  Ready: $ready/$total models, ${ATTEMPTS} attempts each, sequential"
-    echo "  --parallel: per-model (64/32/16 based on ctx + q8_0 KV cache)"
+    echo "  --parallel: per-model values from MODELS array"
     echo ""
 
     # Build worker script — sequential, single port

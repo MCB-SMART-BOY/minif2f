@@ -46,8 +46,8 @@ impl PromptBuilder {
             ),
 
             // ── DeepSeek Coder / V1 — ### Instruction: / ### Response: ───
-            // Goedel-Prover-DPO: prepopulate response with ```lean4 + header
-            // so the model generates proof code inside the block.
+            // Legacy DeepSeek Coder chat support: prepopulate response with
+            // ```lean4 + header so the model generates proof code inside the block.
             // CRITICAL: strip trailing ``` from the prepopulated content.
             // If the model sees a closed ```lean4 block, it outputs EOS or
             // English prose instead of Lean tactics (72% empty in testing).
@@ -56,9 +56,14 @@ impl PromptBuilder {
                     let prepop = user.split("```lean4\n").nth(1).unwrap_or("").trim_end();
                     // Strip closing ``` so model continues inside open code block
                     let prepop = prepop.strip_suffix("```").unwrap_or(prepop).trim_end();
+                    let instruction = if user.trim_end().ends_with("```") {
+                        user.clone()
+                    } else {
+                        format!("{user}\n```")
+                    };
                     format!(
                         "{}### Instruction:\n{}\n### Response:\n```lean4\n{}",
-                        self.config.system_prompt, user, prepop
+                        self.config.system_prompt, instruction, prepop
                     )
                 } else {
                     format!(
@@ -68,7 +73,7 @@ impl PromptBuilder {
                 }
             }
 
-            // ── Raw — no chat template (STP model: trained on raw Lean) ──
+            // ── Raw — no chat template (official DPO/STP completion prompts) ──
             "raw" => user,
 
             // ── Generic fallback ──────────────────────────────────────────
@@ -95,15 +100,7 @@ impl PromptBuilder {
     fn build_kimina(theorem: &Theorem) -> String {
         use std::fmt::Write;
 
-        let mut parts: Vec<&str> = vec![];
-        if !theorem.header.is_empty() {
-            parts.push(&theorem.header);
-        }
-        if !theorem.informal_prefix.is_empty() {
-            parts.push(&theorem.informal_prefix);
-        }
-        parts.push(&theorem.formal_statement);
-        let formal_block = parts.join("\n");
+        let formal_block = theorem_block(theorem, true);
 
         let problem_desc = extract_problem_desc(&theorem.informal_prefix);
 
@@ -120,16 +117,8 @@ impl PromptBuilder {
     /// "Complete the following Lean 4 code: ..." with `sorry` placeholder,
     /// preceded by a proof plan request. Model outputs proof plan + code.
     fn build_goedel_v2(theorem: &Theorem) -> String {
-        let mut parts: Vec<&str> = vec![];
-        if !theorem.header.is_empty() {
-            parts.push(&theorem.header);
-        }
-        if !theorem.informal_prefix.is_empty() {
-            parts.push(&theorem.informal_prefix);
-        }
-        parts.push(&theorem.formal_statement);
-        let formal_block = parts.join("\n");
-        let formal_with_sorry = format!("{formal_block}\n  sorry");
+        let formal_block = theorem_block(theorem, true);
+        let formal_with_sorry = format!("{}\n  sorry", formal_block.trim_end());
 
         format!(
             "Complete the following Lean 4 code:\n\n```lean4\n{formal_with_sorry}```\n\n\
@@ -140,28 +129,19 @@ impl PromptBuilder {
         )
     }
 
-    /// Goedel-Prover-DPO format (DeepSeek Coder chat):
-    /// The chat template prepopulates ### Response with ```lean4 + theorem.
-    /// Model generates proof code inside the block, then closes it with ```.
+    /// Goedel-Prover-DPO official format:
+    /// Raw completion prompt with an open ```lean4 block.
+    /// Model generates proof code inside the block, then may close it with ```.
     fn build_simple(theorem: &Theorem) -> String {
-        let mut parts: Vec<&str> = vec![];
-        if !theorem.header.is_empty() {
-            parts.push(&theorem.header);
-        }
-        if !theorem.informal_prefix.is_empty() {
-            parts.push(&theorem.informal_prefix);
-        }
-        parts.push(&theorem.formal_statement);
-        let formal_block = parts.join("\n");
+        let formal_block = theorem_block(theorem, true);
 
-        // Return just the code block content — the chat template wraps it
         format!(
-            "Complete the following Lean 4 code with explanatory comments preceding each line of code:\n\n```lean4\n{formal_block}\n```"
+            "Complete the following Lean 4 code with explanatory comments preceding each line of code:\n\n```lean4\n{formal_block}"
         )
     }
 
     /// STP model format (official eval script):
-    /// Completion (NOT chat). "Complete the following Lean 4 code:" + ```lean4.
+    /// Completion (NOT chat). "Complete the following Lean 4 code:" + open ```lean4.
     /// Statement = formal_statement with last "sorry" stripped.
     /// Informal prefix is excluded — STP max_model_len is only 1024.
     /// Model generates Lean tactics from `:= by`.
@@ -169,19 +149,16 @@ impl PromptBuilder {
         // Strip trailing "sorry" (official: rsplit("sorry", 1)[0].strip()).
         // No-op for minif2f data (no "sorry" in formal_statements).
         let statement = match theorem.formal_statement.rsplit_once("sorry") {
-            Some((before, _)) => before.trim().to_string(),
-            None => theorem.formal_statement.clone(),
+            Some((before, _)) => before,
+            None => &theorem.formal_statement,
         };
 
-        let mut parts: Vec<&str> = vec![];
-        if !theorem.header.is_empty() {
-            parts.push(&theorem.header);
-        }
+        let mut formal_block = String::new();
+        append_section(&mut formal_block, &theorem.header);
         // NOTE: informal_prefix is intentionally excluded — STP has 1024 ctx
-        parts.push(&statement);
-        let formal_block = parts.join("\n");
+        append_section(&mut formal_block, statement.trim());
 
-        format!("Complete the following Lean 4 code:\n\n```lean4\n{formal_block}\n```")
+        format!("Complete the following Lean 4 code:\n\n```lean4\n{formal_block}")
     }
 
     /// Extract the proof body from model output.
@@ -283,6 +260,26 @@ impl PromptBuilder {
 }
 
 // ── Prompt helpers ──────────────────────────────────────────────────────
+
+fn theorem_block(theorem: &Theorem, include_informal: bool) -> String {
+    let mut out = String::new();
+    append_section(&mut out, &theorem.header);
+    if include_informal {
+        append_section(&mut out, &theorem.informal_prefix);
+    }
+    append_section(&mut out, &theorem.formal_statement);
+    out
+}
+
+fn append_section(out: &mut String, section: &str) {
+    if section.is_empty() {
+        return;
+    }
+    if !out.is_empty() && !out.ends_with('\n') && !section.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(section);
+}
 
 /// Extract natural language problem description from `informal_prefix` (/-- ... -/).
 fn extract_problem_desc(prefix: &str) -> String {
@@ -653,6 +650,10 @@ mod tests {
             prompt.contains("sorry```"),
             "closing ``` must be on same line"
         );
+        assert!(
+            !prompt.contains(":= by\n\n  sorry"),
+            "`sorry` should directly follow `:= by` without an extra blank line"
+        );
     }
 
     #[test]
@@ -661,14 +662,17 @@ mod tests {
         let pb = PromptBuilder::new(cfg);
         let t = make_theorem();
         let prompt = pb.build(&t);
-        // DeepSeek Coder chat format with prepopulated response code block
-        assert!(prompt.contains("### Instruction:"));
-        assert!(prompt.contains("### Response:"));
+        // Official Goedel-DPO eval format: raw completion, open code block
+        assert!(!prompt.contains("### Instruction:"));
+        assert!(!prompt.contains("### Response:"));
         assert!(prompt.contains("Complete the following Lean 4 code with explanatory comments"));
         assert!(prompt.contains("import Mathlib"));
         assert!(prompt.contains("theorem test_thm"));
-        // Response prepopulates ```lean4 + theorem — model continues inside
-        assert!(prompt.contains("### Response:\n```lean4\nimport Mathlib"));
+        assert!(prompt.contains("```lean4\nimport Mathlib"));
+        assert!(
+            !prompt.trim_end().ends_with("```"),
+            "Goedel-DPO prompt must leave the Lean code block open"
+        );
         // No `sorry` in minif2f data
         assert!(!prompt.contains("sorry"));
     }
@@ -705,8 +709,10 @@ mod tests {
         assert!(!prompt.contains("sorry"));
         // informal_prefix is excluded — STP has only 1024 ctx
         assert!(!prompt.contains("sum of two even"));
-        // STP is a completion model: closing ``` on own line lets it generate
-        // Lean tactics after the code block. Same-line closing confuses the model.
+        assert!(
+            !prompt.trim_end().ends_with("```"),
+            "STP prompt must leave the Lean code block open"
+        );
     }
 
     #[test]

@@ -37,7 +37,7 @@ Per-model inference parameters, aligned to official HuggingFace specs.
 |-------|------|---------|
 | `name` | String | CLI name, e.g. `"kimina-prover-rl-1.7b"` |
 | `hf_repo` | String | HuggingFace repo, e.g. `"AI-MO/Kimina-Prover-RL-1.7B"` |
-| `architecture` | String | Chat template: `"qwen3"` \| `"deepseek_v2"` \| `"deepseek_coder"` \| `"raw"` |
+| `architecture` | String | Prompt wrapper: `"qwen3"` \| `"deepseek_v2"` \| `"deepseek_coder"` \| `"raw"` |
 | `prompt_format` | String | User message format: `"kimina"` \| `"goedel_v2"` \| `"simple"` \| `"deepseek_prover"` |
 | `param_count_b` | Option\<f64\> | Billion parameters (for display) |
 | `quantization` | Option\<String\> | e.g. `"awq"`, `"q4_k_m"` |
@@ -80,12 +80,12 @@ Returns all 6 models with official specs. Each entry is a `ModelConfig` struct l
 
 | CLI Name | Arch | Base Model | ctx | max_tok | temp | top_p | seed | Prompt Format | Sys Prompt |
 |----------|------|-----------|-----|---------|------|-------|------|---------------|------------|
-| `goedel-prover-dpo` | deepseek_coder | LLaMA-7B | 4096 | 2048 | 0.6 | 0.95 | 42 | simple | _(empty)_ |
+| `goedel-prover-dpo` | raw | LLaMA-7B | 4096 | 2048 | 1.0 | 0.95 | 1 | simple | _(empty)_ |
 | `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | 131072 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | 131072 | 32768 | 0.6 | 0.95 | 30 | goedel_v2 | _(empty)_ |
+| `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | 40960 | 32768 | 0.6 | 0.95 | 30 | goedel_v2 | _(empty)_ |
 | `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | 32768 | 8192 | 0.6 | 0.95 | 30 | goedel_v2 | _(empty)_ |
 | `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | 131072 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `stp-model-lean` | raw | DS-Prover-V1.5 | 1024 | 1024 | 0.6 | 0.95 | 42 | deepseek_prover | _(empty)_ |
+| `stp-model-lean` | raw | DS-Prover-V1.5 | 1024 | 1024 | 1.0 | 1.0 | 1 | deepseek_prover | _(empty)_ |
 
 ### `find_model(name: &str)` → `Option<ModelConfig>`
 Looks up a model config by CLI name. Used by `main.rs` to resolve the `--model` argument.
@@ -159,13 +159,13 @@ Constructor — stores the model config.
 |-------------|----------|---------|
 | `qwen3` | `<\|im_start\|>system\n{sys}<\|im_end\|>\n<\|im_start\|>user\n{user}<\|im_end\|>\n<\|im_start\|>assistant\n` | Kimina-RL, Goedel-V2, Kimina-Distill |
 | `deepseek_v2` | `{sys}<｜User｜>{user}<｜Assistant｜>` | DeepSeek-Prover-V2 |
-| `deepseek_coder` | `{sys}### Instruction:\n{user}\n### Response:\n` | Goedel-Prover-DPO |
-| `raw` | `{user}` (bare, no template) | STP |
+| `deepseek_coder` | `{sys}### Instruction:\n{user}\n### Response:\n` | Legacy DeepSeek Coder support |
+| `raw` | `{user}` (bare, no template) | Goedel-Prover-DPO, STP |
 
 **Special cases in templates:**
-- **Qwen3**: When `system_prompt.is_empty()` (Goedel-V2), the system message block is entirely omitted — matching official `apply_chat_template` behavior.
+- **Qwen3**: Do not prepopulate an empty `<think>` block. Kimina models generate their own reasoning block; Goedel-V2 uses the official proof-plan prompt instead. When `system_prompt.is_empty()` (Goedel-V2), the system message block is entirely omitted — matching official `apply_chat_template` behavior.
 - **DeepSeek V2**: BOS (`<｜begin▁of▁sentence｜>`) is NOT included in the template — llama-server adds it automatically via `add_bos_token` in the tokenizer config. Including it would produce a double BOS warning.
-- **DeepSeek Coder + simple format**: Prepopulates `### Response:\n```lean4\n{theorem_header}` — the model sees an open code block and continues generating Lean tactics inside it.
+- **Goedel-DPO raw format**: Uses the official Goedel-Prover eval prompt directly, with an open ```lean4 block and no chat wrapper.
 
 #### `PromptBuilder::build_user_message(&self, theorem: &Theorem)` → `String`
 Routes to the format-specific builder based on `config.prompt_format`:
@@ -178,7 +178,7 @@ Routes to the format-specific builder based on `config.prompt_format`:
 | `deepseek_prover` | `build_deepseek_prover()` | STP |
 
 #### `build_kimina(theorem)` → `String`
-```
+~~~text
 Think about and solve the following problem step by step in Lean 4.
 # Problem:{description from informal_prefix}
 # Formal statement:
@@ -187,13 +187,13 @@ Think about and solve the following problem step by step in Lean 4.
 {informal_prefix}
 {formal_statement}
 ```
-```
+~~~
 - NO `sorry` — theorem ends with `:= by`
 - Model expected to output `<think>...</think>` followed by a ```lean4 block
 - Do NOT prepopulate an empty `<think>` block — the model generates it naturally
 
 #### `build_goedel_v2(theorem)` → `String`
-```
+~~~text
 Complete the following Lean 4 code:
 
 ```lean4
@@ -203,35 +203,33 @@ Complete the following Lean 4 code:
   sorry```
   
 Before producing the Lean 4 code to formally prove the given theorem, provide a detailed proof plan...
-```
+~~~
 - Includes `sorry` placeholder — model must replace it
 - Closing ``` on the SAME line as `sorry` (official format)
 
 #### `build_simple(theorem)` → `String`
-```
+~~~text
 Complete the following Lean 4 code with explanatory comments preceding each line of code:
 
 ```lean4
 {header}
 {informal_prefix}
 {formal_statement}
-```
-```
-- Returns just the instruction + closed code block
-- The `deepseek_coder` chat template wraps this, prepopulating `### Response:\n```lean4\n{theorem_header}` to keep the model in code-generation mode
+~~~
+- Raw completion prompt with an open code block
+- Model generates Lean tactics from `:= by`
 
 #### `build_deepseek_prover(theorem)` → `String`
-```
+~~~text
 Complete the following Lean 4 code:
 
 ```lean4
 {header}
 {formal_statement}
-```
-```
+~~~
 - **Excludes** `informal_prefix` — STP has only 1024 context tokens
 - Strips trailing `sorry` from `formal_statement` (official: `rsplit("sorry", 1)[0].strip()`)
-- Model generates Lean tactics from `:= by`
+- Raw completion prompt with an open code block; model generates Lean tactics from `:= by`
 
 ---
 
@@ -344,7 +342,7 @@ struct InferenceEngine {
 | `-m` | model_path | GGUF model file |
 | `--port` | port | HTTP port |
 | `-ngl` | 99 | GPU layers (all) |
-| `--ctx-size` | `min(max_tokens * 3, max_model_len)` | Context window (3× output budget) |
+| `--ctx-size` | `(max_tokens + 4096).min(max_model_len) * parallel` | Total context window; llama-server splits it across parallel slots |
 | `--batch-size` | 2048 | Prompt processing batch size |
 | `--parallel` | parallel | Concurrent GPU slots |
 | `--cache-type-k` | q8_0 | KV cache quantization (key) |
@@ -402,7 +400,7 @@ struct CheckpointManager {
 Loads existing checkpoint from `{checkpoint_dir}/{model_name}__{run_id}.json`. If the file exists, deserializes the HashSet of completed theorem names. Otherwise starts with an empty set.
 
 ### `CheckpointManager::is_done(&self, name: &str)` → `bool`
-Checks if a theorem's 128 attempts are already complete.
+Checks whether a theorem's configured attempt batch is already complete.
 
 ### `CheckpointManager::mark_done(&mut self, name: &str)` → `Result<()>`
 Adds a theorem name to the completed set and **atomically writes** the checkpoint:
@@ -445,11 +443,11 @@ Constructor.
 6. **Build pending list**: Skip theorems already marked done in checkpoint
 
 #### Phase 1: Build Job List
-For each pending theorem × 128 attempts:
+For each pending theorem × `completion_attempts`:
 - Build prompt via `PromptBuilder::build(theorem)`
 - Create JSON body: `{"prompt", "n_predict", "temperature", "top_p", "seed", "stop"}`
 - Seed = `base_seed + attempt_index` (ensures deterministic but diverse sampling)
-- Total jobs = `pending_theorems × 128`
+- Total jobs = `pending_theorems × completion_attempts`
 
 #### Phase 2: Continuous Request Pool (the key architectural decision)
 ```
@@ -463,7 +461,7 @@ Jobs flow through `buffer_unordered(concurrency)`:
 - GPU utilization stays at ~90%+ — no per-theorem idle gaps
 
 #### Phase 3: Per-Theorem Batch Accumulation
-Since `buffer_unordered` interleaves results from different theorems, a `BTreeMap<String, (Theorem, Vec<(usize, String)>)>` accumulates results per theorem. When a theorem's batch reaches 128, it's flushed.
+Since `buffer_unordered` interleaves results from different theorems, a `BTreeMap<String, (Theorem, Vec<(usize, String)>)>` accumulates results per theorem. When a theorem's batch reaches `completion_attempts`, it's flushed.
 
 #### Phase 4: Flush → Extraction → Validation → Write
 When a theorem's batch is complete:
@@ -495,7 +493,7 @@ When a theorem's batch is complete:
 
 #### `flush_batch(results, theorem, batch, pb, checkpoint_dir, model_name, run_id, bar)`
 **Parallel batch extraction via rayon, then sequential BTreeMap insert.**
-1. `rayon::par_iter()` — splits 128 extractions across CPU cores
+1. `rayon::par_iter()` — splits one theorem's attempts across CPU cores
 2. For each attempt: extract proof → assemble Lean → validate → (attempt_index, raw, lean)
 3. Sequential insertion into `ResultsMap`
 4. Spawns `tokio::task::spawn_blocking` for checkpoint write
@@ -575,7 +573,7 @@ Full prompt string → JSON body {prompt, n_predict, temperature, top_p, seed, s
   │     └─► InferenceEngine::generate_one_with_retry() → model_output_text
   │
   ▼
-Per-theorem batch (128 results)
+Per-theorem batch (`completion_attempts` results)
   │
   ├─► rayon::par_iter(): parallel extraction
   │     │
@@ -613,15 +611,15 @@ The key architectural decision: **NO per-theorem barrier**.
 ### Old architecture (abandoned):
 ```
 for each theorem:
-    submit 128 requests
-    wait for ALL 128 ← BARRIER (GPU idle!)
+    submit N requests
+    wait for ALL N ← BARRIER (GPU idle!)
     extract + validate (CPU work)
 ```
 GPU utilization dropped to 4-8% between theorems.
 
 ### Current architecture:
 ```
-All 488×128 requests submitted through buffer_unordered(concurrency).
+All pending theorem × attempt requests are submitted through buffer_unordered(concurrency).
 buffer_unordered keeps `concurrency` requests in flight at all times.
 When one completes → next job starts immediately.
 Results from ANY theorem flow in → batched per theorem → flushed when complete.
@@ -634,7 +632,7 @@ GPU stays at ~90%+ utilization. No idle gaps.
 - Jobs are ordered by theorem in the input stream, but results arrive in completion order
 
 ### Rayon parallel extraction
-When a theorem's 128 results are complete, `rayon::par_iter()` splits the 128 extraction+validation operations across all CPU cores. This keeps the main async loop free to continue feeding the GPU while CPU work happens in parallel.
+When a theorem's configured attempts are complete, `rayon::par_iter()` splits extraction+validation operations across all CPU cores. This keeps the main async loop free to continue feeding the GPU while CPU work happens in parallel.
 
 ---
 
@@ -644,8 +642,8 @@ When a theorem's 128 results are complete, `rayon::par_iter()` splits the 128 ex
 |--------|--------|-----------|---------|---------|
 | `kimina` | Kimina-RL-1.7B, Kimina-Distill-8B | Chat (system+user) | No | "Think about and solve..." with `# Problem:` and `# Formal statement:` |
 | `goedel_v2` | Goedel-V2-8B, DeepSeek-Prover-V2-7B | Chat (user only) | Yes | "Complete the following Lean 4 code:" + proof plan request |
-| `simple` | Goedel-Prover-DPO | Chat (user only, DeepSeek Coder) | No | "Complete... with explanatory comments..." + closed code block |
-| `deepseek_prover` | STP | Completion (raw) | No | "Complete the following Lean 4 code:" (from `:= by`, no informal_prefix) |
+| `simple` | Goedel-Prover-DPO | Completion (raw) | No | "Complete... with explanatory comments..." + open code block |
+| `deepseek_prover` | STP | Completion (raw) | No | "Complete the following Lean 4 code:" + open code block (from `:= by`, no informal_prefix) |
 
 ---
 
@@ -666,34 +664,37 @@ When a theorem's 128 results are complete, `rayon::par_iter()` splits the 128 ex
 - **GPU**: RTX 5090 32GB (CUDA)
 - **1.7B FP16**: ~3.2 GB VRAM. **7-8B Q4_K_M**: ~4-5 GB VRAM
 - **KV cache**: q8_0 quantization, shared paged pool — `--parallel` does NOT linearly multiply VRAM
-- **Per-model parallelism** (tuned for 32GB, q8_0 KV cache):
-  - Goedel-Prover-DPO: 128
-  - DeepSeek-Prover-V2-7B: 96
-  - Kimina-Prover-RL-1.7B: 128
-  - Goedel-Prover-V2-8B: 48
-  - Kimina-Prover-Distill-8B: 96
+- **Per-model parallelism** (current `scripts/generate-all.sh` values):
+  - Goedel-Prover-DPO: 16
+  - DeepSeek-Prover-V2-7B: 7
+  - Kimina-Prover-RL-1.7B: 24
+  - Goedel-Prover-V2-8B: 8
+  - Kimina-Prover-Distill-8B: 24
+  - STP_model_Lean: 16
 
 ---
 
 ## Context Size Formula
 
 ```
-ctx_size = (max_tokens * 3).min(max_model_len)
+per_slot = (max_tokens + 4096).min(max_model_len)
+ctx_size = per_slot * parallel
 ```
 
-- `max_tokens * 3`: triple the output budget — provides generous headroom for input prompts AND model reasoning (`<think>` blocks, proof plans, chain-of-thought)
-- `.min(max_model_len)`: capped at model's maximum context length
+- `max_tokens + 4096`: output budget plus prompt/reasoning headroom per slot
+- `.min(max_model_len)`: capped at the model's official context limit
+- `* parallel`: llama-server divides `--ctx-size` across parallel slots
 - q8_0 KV cache + shared paged pool makes large ctx-sizes viable (VRAM grows ~65KB/token for 8B, ~49KB/token for 1.7B)
 
-Per-model ctx-size:
-| Model | max_tok | Formula | ctx_size | Δ |
-|-------|---------|---------|----------|---|
-| kimina-prover-rl-1.7b | 8096 | 8096×3 | **24,288** | 2× |
-| goedel-prover-v2-8b | 32768 | 32768×3 | **98,304** | 2.7× |
-| deepseek-prover-v2-7b | 8192 | 8192×3 | **24,576** | 2× |
-| kimina-prover-distill-8b | 8096 | 8096×3 | **24,288** | 2× |
-| goedel-prover-dpo | 2048 | capped | 4,096 | — |
-| stp-model-lean | 1024 | capped | 1,024 | — |
+Per-slot context:
+| Model | max_tok | max_model_len | per_slot |
+|-------|---------|---------------|----------|
+| kimina-prover-rl-1.7b | 8096 | 131072 | **12,192** |
+| goedel-prover-v2-8b | 32768 | 40960 | **36,864** |
+| deepseek-prover-v2-7b | 8192 | 32768 | **12,288** |
+| kimina-prover-distill-8b | 8096 | 131072 | **12,192** |
+| goedel-prover-dpo | 2048 | 4096 | **4,096** |
+| stp-model-lean | 1024 | 1024 | **1,024** |
 
 ---
 
@@ -701,7 +702,7 @@ Per-model ctx-size:
 
 - Checkpoint file: `results/checkpoints/<model>__<run_id>.json` — a JSON array of theorem names
 - **Atomic write**: temp file → rename (Unix atomic)
-- **Trigger**: per-theorem (when all 128 attempts complete)
+- **Trigger**: per-theorem (when all configured attempts complete)
 - **Resume**: `--run-id <run_id>` → loads checkpoint, skips completed theorems
 - **Incremental JSON write**: every 20 theorems, both output JSONs are written to disk (independent of checkpoint)
   - Checkpoint only records theorem names, not proof data
@@ -714,7 +715,7 @@ Per-model ctx-size:
 ```bash
 cargo fmt --check          # formatting verification
 cargo clippy -- -D warnings  # lint (0 warnings required)
-cargo test                 # unit tests (~34 tests)
+cargo test                 # unit tests (~35 tests)
 cargo build --release      # optimized build
 ```
 
@@ -726,7 +727,7 @@ cargo build --release      # optimized build
 ### `./scripts/setup.sh` — One-time deployment script
 ### `./scripts/generate-all.sh` — Parallel generation via tmux
 
-Runs all 5 models sequentially (STP skipped — already verified working). Each model gets:
+Runs all 6 configured models sequentially. Each model gets:
 - llama-server on port 8080
 - Per-model `--parallel` value
 - Retry loop (max 5 attempts with exponential backoff)

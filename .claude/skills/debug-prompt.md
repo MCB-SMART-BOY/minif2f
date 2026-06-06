@@ -20,11 +20,11 @@ curl -s --noproxy '*' \
   -H "Authorization: Bearer minif2f" \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "### Instruction:\nComplete the following Lean 4 code:\n\n```lean4\nimport Mathlib\n\ntheorem test : 1 + 1 = 2 := by\n```\n\n### Response:\n```lean4\nimport Mathlib\n\ntheorem test : 1 + 1 = 2 := by\n",
+    "prompt": "Complete the following Lean 4 code with explanatory comments preceding each line of code:\n\n```lean4\nimport Mathlib\n\ntheorem test : 1 + 1 = 2 := by\n",
     "n_predict": 128,
-    "temperature": 0.6,
+    "temperature": 1.0,
     "top_p": 0.95,
-    "seed": 42,
+    "seed": 1,
     "stop": ["<｜end▁of▁sentence｜>", "<|EOT|>", "### Instruction:", "</s>"],
     "n_probs": 0
   }' \
@@ -58,7 +58,7 @@ with open('data/raw/minif2f.jsonl') as f:
 | Symptom | Likely Cause | Check |
 |---------|-------------|-------|
 | All outputs empty (``) | Stop token in prompt start / closed code block | Does prompt end with ``` inside a code block? |
-| Output is English prose, not Lean | Model generating outside code block | Is prepopulated response block open or closed? |
+| Output is English prose, not Lean | Model generating outside code block | Does the prompt leave the Lean code block open? |
 | Truncated output (truncated=1) | max_tokens too low for theorem | Check n_tokens vs max_tokens |
 | Very short outputs (<10 tokens) | Model hitting EOS immediately | Check stop_sequences don't match prompt content |
 | Model ignores system prompt | Empty system_prompt → block omitted | Qwen3: check `system_prompt.is_empty()` logic |
@@ -67,17 +67,15 @@ with open('data/raw/minif2f.jsonl') as f:
 
 | Model | Architecture | Prompt Format | Key Gotcha |
 |-------|-------------|---------------|------------|
-| goedel-prover-dpo | deepseek_coder | simple | Strip trailing ``` from prepopulated response |
+| goedel-prover-dpo | raw | simple | Official raw prompt with open ```lean4 block |
 | kimina-prover-rl-1.7b | qwen3 | kimina | Don't prepopulate `<think>` |
 | goedel-prover-v2-8b | qwen3 | goedel_v2 | User msg only, no system prompt |
 | deepseek-prover-v2-7b | deepseek_v2 | goedel_v2 | Unicode ｜, no system prompt |
 | kimina-prover-distill-8b | qwen3 | kimina | Same as kimina-rl |
 | stp-model-lean | raw | deepseek_prover | No chat template, max 1024 ctx |
 
-## Verify prompt fix: Goedel-DPO trailing ```
+## Verify prompt: Goedel-DPO open code block
 
-The `deepseek_coder` + `simple` template now strips the closing ```:
-```rust
-let prepop = prepop.strip_suffix("```").unwrap_or(prepop).trim_end();
-```
-Verify: prompt should end with `:= by` (open code block), NOT with `````.
+The `raw` + `simple` template should end with the theorem statement at `:= by`
+inside an open ```lean4 block. It should not add `### Instruction`, `### Response`,
+or a closing ``` before generation.

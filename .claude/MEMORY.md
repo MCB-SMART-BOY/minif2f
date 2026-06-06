@@ -1,10 +1,10 @@
 - [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem, 6 models, two-layer JSON output, validate_lean_code gate
-- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, --parallel 48–128, KV cache q8_0 shared pool
+- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, per-model --parallel values, KV cache q8_0 shared pool
 - [Pipeline Architecture](memory/pipeline-architecture.md) — buffer_unordered GPU → rayon par_iter CPU → validate → two-layer JSON, incremental writes
-- [Model Registry](memory/model-registry.md) — 6 models with official specs, 4 architectures, STP max_len=1024, Goedel-DPO deepseek_coder
-- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 34 tests (prompts:21 + models:6 + data:3 + checkpoint:4)
+- [Model Registry](memory/model-registry.md) — 6 models with official specs, raw Goedel-DPO/STP, STP max_len=1024
+- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 36 tests
 - [Git Commit Style](memory/git-commit-style.md) — No Co-Authored-By lines in commits
 - [Kimina-Prover Think Mode](memory/kimina-prover-think-mode.md) — RL format reward requires `<think>`; empty think breaks model
 - [Checkpoint Resume Fix](memory/checkpoint-resume-fix.md) — Loads existing JSON on resume; no data loss
-- [Goedel-DPO Prompt Fix](memory/goedel-dpo-prompt-fix.md) — Trailing ``` in prepopulated response caused 72% empty outputs; strip it
+- [Goedel-DPO Prompt Fix](memory/goedel-dpo-prompt-fix.md) — Historical chat-prepopulation fix; current DPO uses official raw prompt
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — Full function-level architecture documentation (all 9 source files, end-to-end data flow)

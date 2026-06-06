@@ -18,16 +18,23 @@ pub struct Theorem {
 impl Theorem {
     #[must_use]
     pub fn make_proof_file(&self, proof_body: &str) -> String {
-        let mut parts: Vec<&str> = vec![];
-        if !self.header.is_empty() {
-            parts.push(&self.header);
-        }
-        if !self.informal_prefix.is_empty() {
-            parts.push(&self.informal_prefix);
-        }
-        parts.push(&self.formal_statement);
-        format!("{}\n{proof_body}", parts.join("\n"))
+        let mut code = String::new();
+        append_section(&mut code, &self.header);
+        append_section(&mut code, &self.informal_prefix);
+        append_section(&mut code, &self.formal_statement);
+        append_section(&mut code, proof_body);
+        code
     }
+}
+
+fn append_section(out: &mut String, section: &str) {
+    if section.is_empty() {
+        return;
+    }
+    if !out.is_empty() && !out.ends_with('\n') && !section.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(section);
 }
 
 /// Load theorems from a JSONL file, optionally filtering by split.

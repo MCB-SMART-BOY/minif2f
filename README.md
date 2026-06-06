@@ -26,7 +26,7 @@ Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/mini
 4) Build Project
 5) Check Status
 6) Generate Proofs (single model)
-7) Generate All Models (tmux background, 2 parallel, 128 attempts)
+7) Generate All Models (tmux background, sequential, 128 attempts)
 8) Do It All (setup → quality → build → generate all)
 ```
 
@@ -84,7 +84,7 @@ output/
 ├── run                    # Entry point (interactive menu)
 ├── scripts/
 │   ├── setup.sh           # One-time deployment
-│   └── generate-all.sh    # Sequential generation (tmux, single slot, 5 models)
+│   └── generate-all.sh    # Sequential generation (tmux, single slot, 6 models)
 └── src/
     ├── main.rs            # CLI (clap)
     ├── lib.rs             # Modules
@@ -99,26 +99,27 @@ output/
 
 ## Supported Models
 
-| Model | Architecture | Chat Template | Prompt | ctx | max_tok |
-|-------|-------------|---------------|--------|-----|---------|
-| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 131K | 8096 |
-| goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 131K | 32768 |
-| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 32K | 8192 |
-| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 131K | 8096 |
-| goedel-prover-dpo | DeepSeek Coder | `###` | simple | 4096 | 2048 |
-| stp-model-lean | Raw | none | deepseek_prover | 1024 | 1024 |
+| Model | Architecture | Chat Template | Prompt | ctx | max_tok | temp | top_p | seed |
+|-------|-------------|---------------|--------|-----|---------|------|-------|------|
+| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 131K | 8096 | 0.6 | 0.95 | 42 |
+| goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 40960 | 32768 | 0.6 | 0.95 | 30 |
+| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 32K | 8192 | 0.6 | 0.95 | 30 |
+| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 131K | 8096 | 0.6 | 0.95 | 42 |
+| goedel-prover-dpo | Raw | none | simple | 4096 | 2048 | 1.0 | 0.95 | 1 |
+| stp-model-lean | Raw | none | deepseek_prover | 1024 | 1024 | 1.0 | 1.0 | 1 |
 
 ## Design
 
-- **Deep thinking (Qwen3 models)**: Model generates `<think>reasoning</think>` naturally (RL-trained format reward). Empty think block breaks the model — removed after audit discovered 57.6% duplicate outputs.
+- **Deep thinking (Kimina models)**: Kimina official RL notes require the model output to contain its own `<think>...</think>` reasoning block before the Lean code block. Do not prepopulate an empty think block. Goedel-V2 is also Qwen3, but its official prompt requirement is a proof plan plus Lean code, not the Kimina format reward.
 - **`sorry` placeholder**: Goedel-V2 format includes `sorry` in theorem statement, matching official HF prompt format. Kimina, Simple (Goedel-DPO), and STP formats do NOT include `sorry` — model generates from `:= by`.
+- **Goedel-DPO**: Raw completion prompt with an open ```lean4 block, matching the official Goedel-Prover eval script. Sampling is `temperature=1.0`, `top_p=0.95`, `max_tokens=2048`, seed 1.
 - **Proof extraction**: Multi-strategy with 8-layer validation — `find` (not `rfind`) preserves nested `have ... := by` blocks. `strip_block_comments()` rejects commentary-only proofs. `validate_lean_code()` ensures complete compilable Lean files.
 - **Checkpoint resume**: Loads existing raw_output + lean_code JSON on startup, merges tuples. Previously-completed theorems are not re-generated.
 - **Incremental writes**: JSON written every 20 theorems — crash resilience independent of checkpoint system.
 - **Two-layer output**: `output/raw_output/` (unfiltered) + `output/lean_code/` (extracted + validated). Same flat JSON format in both.
-- **STP model**: Raw architecture (no chat template), DeepSeek Prover format (no `sorry`, no informal_prefix). `max_model_len=1024`. Matches STP paper §3.1 exactly.
+- **STP model**: Raw architecture (no chat template), DeepSeek Prover format with an open ```lean4 block, no `sorry`, no informal_prefix. `max_model_len=1024`, `top_p=1.0`, seed 1. Matches the official STP eval scripts.
 - **128 attempts**: Default. Configurable via `-n`. Used for Pass@k evaluation.
-- **Sequential generation**: `generate-all.sh` runs models one at a time on port 8080 with per-model `--parallel` values (48–128). Single tmux session.
+- **Sequential generation**: `generate-all.sh` runs all configured models one at a time on port 8080 with per-model `--parallel` values. Single tmux session.
 - **GPU**: RTX 5090 32GB CUDA. KV cache q8_0 shared paged pool — `--parallel` does NOT linearly multiply VRAM.
 - **Crash recovery**: `results/checkpoints/<model>__<run_id>.json` — resume with `--run-id`
 
@@ -133,5 +134,5 @@ output/
 ```bash
 cargo fmt --check          ✅
 cargo clippy -- -D warnings  ✅
-cargo test                 ✅ 34/34
+cargo test                 ✅ 36/36
 ```

@@ -40,6 +40,7 @@ The sweet spot maximizes **total throughput** (p × per_slot_tps), not VRAM util
 | kimina-prover-rl-1.7b | Qwen3 | 1.7B | **24** | 292608 | 12192 |
 | goedel-prover-v2-8b | Qwen3 | 8B | **8** | 294912 | 36864 |
 | kimina-prover-distill-8b | Qwen3 | 8B | **24** | 292608 | 12192 |
+| stp-model-lean | LLaMA-7B | 7B | **16** | 16384 | 1024 |
 
 **LLaMA-7B** (no GQA, kv=256KB/tok): larger KV cache per token → fewer slots fit. p=16 is sweet spot.
 **Qwen3** (GQA, kv=64KB/tok): 4× smaller KV per token → can push higher parallel. 1.7B FP16 smaller model → even faster.
@@ -54,7 +55,7 @@ llama-server divides ctx by parallel for per-slot context. Formula ensures each 
 ## Multi-model
 - Single port (8080), sequential execution
 - `./scripts/generate-all.sh` creates tmux session, runs models one at a time
-- ETA per model: 7B LLaMA ~4h, 8B Qwen3 ~6h, 1.7B Qwen3 ~0.5h. Total ~20h for all 5 models.
+- ETA per model: 7B LLaMA ~4h, 8B Qwen3 ~6h, 1.7B Qwen3 ~0.5h. Total depends on enabled GGUFs in `scripts/generate-all.sh`.
 
 **Why:** Q4_K_M + memory bandwidth bottleneck means more parallel ≠ faster. The optimal parallel balances per-slot speed with total throughput.
 

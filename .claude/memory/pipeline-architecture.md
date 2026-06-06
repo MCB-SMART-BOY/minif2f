@@ -26,9 +26,9 @@ metadata:
 │ Accumulation: BTreeMap<theorem, Vec<(idx, text)>>       │
 │                                                         │
 │  Results arrive in completion order. Batched per        │
-│  theorem. When batch reaches 128 → flush.               │
+│  theorem. When batch reaches configured attempts → flush.│
 └──────────────────────┬──────────────────────────────────┘
-                       │ batch of 128
+                       │ attempt batch
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │ Stage 2: CPU extraction (rayon par_iter)                │
@@ -59,10 +59,10 @@ metadata:
 |-------------|---------------|--------|
 | `qwen3` | `<|im_start|>` ChatML | kimina, goedel-v2, distill |
 | `deepseek_v2` | Unicode `｜` (U+FF5C) | deepseek-prover-v2 |
-| `deepseek_coder` | `### Instruction:` / `### Response:` | goedel-dpo |
-| `raw` | None (bare message) | stp-model-lean |
+| `deepseek_coder` | `### Instruction:` / `### Response:` | legacy support |
+| `raw` | None (bare message) | goedel-dpo, stp-model-lean |
 
-**DeepSeek Coder (Goedel-DPO)**: Prepopulated `### Response:\n\`\`\`lean4\n{code}` WITHOUT closing ```. Trailing ``` stripped in `src/prompts.rs` (`.strip_suffix("\`\`\`")`), otherwise model outputs EOS immediately (72% empty observed before fix).
+**Goedel-DPO**: Uses the official raw completion prompt with an open ```lean4 block. No chat wrapper, no `sorry`; sampling is `temperature=1.0`, `top_p=0.95`, `max_tokens=2048`, seed=1.
 
 ## Proof Extraction (prompts.rs, 4 strategies + validation)
 
@@ -82,7 +82,7 @@ metadata:
 ## Script System
 
 - `./run` — Interactive menu (8 options)
-- `scripts/generate-all.sh` — **Sequential** (5 models, one at a time), per-model `--parallel`, tmux session
+- `scripts/generate-all.sh` — **Sequential** (6 models, one at a time), per-model `--parallel`, tmux session
 - `scripts/setup.sh` — One-time deployment
 
 ## Quality Gates
@@ -90,5 +90,5 @@ metadata:
 ```bash
 cargo fmt --check          ✅
 cargo clippy -- -D warnings ✅
-cargo test                 ✅ 34/34
+cargo test                 ✅ 36/36
 ```

@@ -18,7 +18,7 @@ struct Cli {
 enum Commands {
     /// List available models
     ListModels,
-    /// Generate proofs for a model (all 488 theorems)
+    /// Generate proofs for a model (all loaded miniF2F theorems)
     Generate {
         /// Model name
         #[arg(short, long)]

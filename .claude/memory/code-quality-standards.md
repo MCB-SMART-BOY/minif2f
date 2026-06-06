@@ -1,6 +1,6 @@
 ---
 name: code-quality-standards
-description: Rust code quality — 3 checks that MUST pass before committing, 34 tests
+description: Rust code quality — 3 checks that MUST pass before committing, 36 tests
 metadata:
   type: project
 ---
@@ -10,7 +10,7 @@ All code changes MUST pass:
 ```bash
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo test                 # 34/34 (prompts:21 + models:6 + data:3 + checkpoint:4)
+cargo test                 # 36/36 (prompts + models + data + checkpoint)
 ```
 
 **Why:** Pure Rust project, 9 source files, ~910 LOC. Zero warnings, zero failures.

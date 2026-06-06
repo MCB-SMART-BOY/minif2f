@@ -14,7 +14,7 @@ Generate 128 proof attempts per theorem for [miniF2F](https://github.com/openai/
 # Quality gates (ALL must pass)
 cargo fmt --check          # formatting
 cargo clippy -- -D warnings  # lint (0 warnings)
-cargo test                 # unit tests (34/34)
+cargo test                 # unit tests (36/36)
 
 # Build
 cargo build                # debug
@@ -29,7 +29,7 @@ cargo run -- status --run-id v1
 # Scripts
 ./run                       # Interactive menu (8 options)
 ./scripts/setup.sh          # One-time deployment
-./scripts/generate-all.sh   # Sequential generation (tmux, 5 models, one at a time)
+./scripts/generate-all.sh   # Sequential generation (tmux, 6 models, one at a time)
 ```
 
 ## Architecture
@@ -46,12 +46,12 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
   │      --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on
   │
   ├─ 2. Continuous request pool (NO per-theorem barrier):
-  │      All 488×128 jobs → stream::iter → buffer_unordered(N)
+  │      All theorem×attempt jobs → stream::iter → buffer_unordered(N)
   │      N = --parallel (concurrent HTTP requests in flight).
   │      When one request completes, the next starts immediately.
   │      Results arrive in completion order → batched per theorem.
   │
-  ├─ 3. Per-theorem flush (when 128 results collected):
+  ├─ 3. Per-theorem flush (when configured attempts collected):
   │      rayon::par_iter() → parallel extract_proof() + validate_lean_code()
   │      Sequential BTreeMap insert → checkpoint → incremental JSON write
   │
@@ -84,7 +84,7 @@ data/raw/minif2f.jsonl (488 theorems)
   → prompts.rs: arch-specific chat template + 4 format-specific user prompts
   → stream::iter(all_jobs).buffer_unordered(N) → HTTP POST /completion
   → llama-server GPU inference (--parallel N concurrent slots)
-  → Per-theorem batch (128 results) → rayon::par_iter():
+  → Per-theorem batch (configured attempts) → rayon::par_iter():
        extract_proof() → make_proof_file() → validate_lean_code()
   → ResultsMap: { theorem → { attempt_N → (raw_output, lean_code) } }
   → Write output/raw_output/<model>.json every 20 theorems
@@ -125,7 +125,7 @@ Both use the same flat JSON format:
 ## Pipeline: Continuous Request Pool
 
 The key architectural decision: **NO per-theorem barrier**. The old architecture
-processed theorems sequentially — submit 128 requests, wait for all 128, do CPU
+processed theorems sequentially — submit N requests, wait for all N, do CPU
 work, then start the next theorem. GPU utilization dropped to 4-8% between theorems.
 
 The current architecture uses **buffer_unordered + rayon parallel extraction**:
@@ -134,7 +134,7 @@ The current architecture uses **buffer_unordered + rayon parallel extraction**:
 stream::iter(all_jobs)               Per-theorem accumulation
   .buffer_unordered(N)               BTreeMap<name, Vec<(idx, text)>>
   │                                  │
-  ├─ HTTP POST → llama-server        ├─ Batch reaches 128 → flush
+  ├─ HTTP POST → llama-server        ├─ Batch reaches attempts → flush
   ├─ N requests in flight            │
   ├─ GPU saturated (~90%+)           ├─ rayon::par_iter():
   └─ Results in completion order     │    extract_proof()
@@ -156,18 +156,19 @@ GPU utilization stays at ~90%+ with no idle gaps.
 |-------------|--------|---------|
 | `qwen3` | `<\|im_start\|>` ChatML | kimina, goedel-v2, distill |
 | `deepseek_v2` | Unicode fullwidth `｜` (U+FF5C) | deepseek-prover-v2 |
-| `deepseek_coder` | `### Instruction:` / `### Response:` | goedel-prover-dpo |
-| `raw` | None (bare message) | stp-model-lean |
+| `deepseek_coder` | `### Instruction:` / `### Response:` | legacy support |
+| `raw` | None (bare message) | goedel-prover-dpo, stp-model-lean |
 
-**Qwen3**: Model generates `<think>` block naturally (RL-trained format reward).
-Do NOT prepopulate an empty think block — that breaks the reasoning chain.
-When `system_prompt` is empty (Goedel-V2), the system message block is omitted
-from the ChatML template — matching the official `apply_chat_template` behaviour.
+**Qwen3**: Do NOT prepopulate an empty `<think>` block. Kimina models are expected
+to generate their own `<think>...</think>` reasoning before the Lean code block.
+Goedel-V2 is Qwen3 too, but its official requirement is a proof plan followed by
+Lean code, not the Kimina RL format reward. When `system_prompt` is empty
+(Goedel-V2), the system message block is omitted from ChatML — matching the
+official `apply_chat_template` behaviour.
 
-**DeepSeek Coder (Goedel-DPO)**: The `simple` format prepopulates `### Response:` with
-```lean4` + theorem. **CRITICAL**: the trailing ``` in the prepopulated content MUST be
-stripped. If the model sees a closed code block, it outputs EOS immediately (72% empty).
-Fixed in `src/prompts.rs`: `.strip_suffix("\`\`\`")`.
+**Goedel-DPO**: The `simple` format is a raw completion prompt matching the official
+Goedel-Prover eval script: "Complete the following Lean 4 code with explanatory comments..."
+plus an open ```lean4 block. No chat wrapper and no `sorry`.
 
 ## Proof Extraction & Validation
 
@@ -196,35 +197,35 @@ Key functions:
 |--------|---------|-------|---------|---------|
 | `kimina` | kimina-rl-1.7b, kimina-distill-8b | Chat (system+user) | No | "Think about and solve..." with `# Problem:` and `# Formal statement:` |
 | `goedel_v2` | goedel-v2-8b, deepseek-prover-v2-7b | Chat (user only) | Yes | "Complete the following Lean 4 code:" + proof plan request |
-| `simple` | goedel-prover-dpo | Chat (DeepSeek Coder) | No | "Complete... with explanatory comments..." + prepopulated `### Response:\n```lean4` |
-| `deepseek_prover` | stp-model-lean | **Completion** (raw) | **No** | "Complete the following Lean 4 code:" (from `:= by`, no `informal_prefix`) |
+| `simple` | goedel-prover-dpo | Completion (raw) | No | "Complete... with explanatory comments..." + open code block |
+| `deepseek_prover` | stp-model-lean | **Completion** (raw) | **No** | "Complete the following Lean 4 code:" + open code block (from `:= by`, no `informal_prefix`) |
 
 ## 6 Models (Official Specs)
 
 | CLI Name | Arch | Base | ctx | max_tok | temp | top_p | seed | Prompt | SysPrompt |
 |----------|------|------|-----|---------|------|-------|------|--------|-----------|
 | `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | **131K** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `goedel-prover-dpo` | **deepseek_coder** | LLaMA-7B | 4096 | **2048** | 0.6 | 0.95 | 42 | simple | _(none)_ |
-| `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | **131K** | **32768** | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
+| `goedel-prover-dpo` | **raw** | LLaMA-7B | 4096 | **2048** | 1.0 | 0.95 | 1 | simple | _(none)_ |
+| `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | **40960** | **32768** | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
 | `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | **32K** | 8192 | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
 | `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | **131K** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `stp-model-lean` | **raw** | DS-Prover-V1.5 | **1024** | **1024** | 0.6 | 0.95 | 42 | **deepseek_prover** | _(none)_ |
+| `stp-model-lean` | **raw** | DS-Prover-V1.5 | **1024** | **1024** | 1.0 | 1.0 | 1 | **deepseek_prover** | _(none)_ |
 
-Bold values match official HuggingFace `config.json` / `tokenizer_config.json` / eval scripts.
+Bold values are sourced from explicit HuggingFace model cards, HuggingFace `config.json` / `tokenizer_config.json`, or official eval scripts. When those sources differ, `ctx` follows the model card if it explicitly sets `max_model_len`; otherwise it follows model `config.json` (`max_position_embeddings`).
 
 ### Official sources:
-1. Goedel-Prover-DPO — DeepSeek Coder chat. Prompt: "Complete the following Lean 4 code with explanatory comments..." + ```lean4 block. Template prepopulates `### Response:\n\`\`\`lean4\n{code}` to keep model in code-generation mode. `full_code = extract_code(model_input + model_output)`. EOS=100001, max_tokens=2048.
+1. Goedel-Prover-DPO — raw completion prompt. Prompt: "Complete the following Lean 4 code with explanatory comments..." + open ```lean4 block. `full_code = extract_code(model_input + model_output)` in the official eval script. EOS=100001, max_tokens=2048, temperature=1.0, top_p=0.95, seed=1.
 2. Kimina-Prover-RL-1.7B — Qwen3 ChatML. System: "expert in mathematics and proving theorems in Lean 4". Prompt: "Think about and solve..." with `# Problem:` and `# Formal statement:`. NO `sorry` — theorem ends with `:= by`. EOS=151645, max_tokens=8096.
-3. Goedel-Prover-V2-8B — Qwen3 ChatML, user message only (NO system prompt). Prompt: "Complete the following Lean 4 code:" + proof plan request. `formal_statement` includes `sorry`. EOS=151645, max_new_tokens=32768, seed=30.
+3. Goedel-Prover-V2-8B — Qwen3 ChatML, user message only (NO system prompt). Prompt: "Complete the following Lean 4 code:" + proof plan request. `formal_statement` includes `sorry`. EOS=151645, `max_position_embeddings=40960`, max_new_tokens=32768, seed=30.
 4. DeepSeek-Prover-V2-7B — DeepSeek V2 ChatML, user message only (NO system prompt). Same prompt as Goedel-V2. EOS=100001, 32K context, max_new_tokens=8192, seed=30.
 5. Kimina-Prover-Distill-8B — Qwen3 ChatML. System: "expert in mathematics and Lean 4". Same prompt as Kimina-RL. NO `sorry`. EOS=151645, max_tokens=8096.
-6. STP_model_Lean — Completion (NOT chat). `max_model_len=1024`, `max_tokens=1024`. Prompt: "Complete the following Lean 4 code:" + ```lean4 block with header+statement (no informal_prefix). `statement = formal_statement.rsplit('sorry', 1)[0].strip()`. EOS=100001.
+6. STP_model_Lean — Completion (NOT chat). `max_model_len=1024`, `max_tokens=1024`, `temperature=1.0`, `top_p=1.0`, seed=1. Prompt: "Complete the following Lean 4 code:" + open ```lean4 block with header+statement (no informal_prefix). `statement = formal_statement.rsplit('sorry', 1)[0].strip()`. EOS=100001.
 
 ## Checkpointing
 
 `results/checkpoints/<model>__<run_id>.json`. Atomic write (tmp → rename). Resume with `--run-id`.
 
-Per-theorem checkpoint triggered when all 128 attempts complete (via `flush_batch`).
+Per-theorem checkpoint triggered when all configured attempts complete (via `flush_batch`).
 Checkpoint resume loads existing raw_output + lean_code JSON, merges tuples.
 
 **Incremental JSON writes**: Every 20 theorems, both output JSONs are written to disk
