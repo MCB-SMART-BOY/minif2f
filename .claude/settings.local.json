@@ -132,7 +132,20 @@
       "Bash(sort -k2 -n)",
       "Bash(ls /root/.claude/projects/ 2>/dev/null || echo \"no projects dir\" *)",
       "Bash(gh auth *)",
-      "Bash(# Check for SSH keys or tokens *)"
+      "Bash(# Check for SSH keys or tokens *)",
+      "Bash(tmux ls *)",
+      "Bash(ATTEMPTS=128 RUN_ID_PREFIX=\"v128-20260607-official\" bash scripts/generate-all.sh)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'Theorems complete: {len\\(d\\)}'\\); [print\\(f'  {i}. {t}'\\) for i,t in enumerate\\(d[:10],1\\)]\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'Complete: {len\\(d\\)} theorems'\\)\")",
+      "Bash(curl -s http://localhost:8080/completion -H 'Authorization: Bearer minif2f' -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('content',''\\)[:800]\\)\")",
+      "Bash(curl -s \"http://localhost:8080/completion\" -H \"Authorization: Bearer minif2f\" -H \"Content-Type: application/json\" -d '{\"prompt\":\"Complete the following Lean 4 code with explanatory comments preceding each line of code:\\\\n\\\\n```lean4\\\\nimport Mathlib\\\\n\\\\ntheorem test \\(a b : Nat\\) : a + b = b + a := by\",\"n_predict\":150,\"temperature\":1.0,\"top_p\":0.95,\"seed\":1,\"stop\":[\"<|end_of_sentence|>\",\"<|EOT|>\",\"### Instruction:\",\"</s>\"]}')",
+      "Bash(awk '{sum+=$1; count++} END {printf \"avg: %d, count: %d\\\\n\", sum/count, count}')",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('results/checkpoints/goedel-prover-dpo__v128-20260607-official-goedel-prover-dpo.json'\\)\\); print\\(f'{len\\(d\\)} theorems complete'\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('results/checkpoints/goedel-prover-dpo__v128-20260607-official-goedel-prover-dpo.json'\\)\\); print\\(f'{len\\(d\\)} theorems'\\)\")",
+      "Bash(awk '{sum+=$1; count++; if\\($1>max\\)max=$1; if\\(min==\"\"||$1<min\\)min=$1} END {printf \"avg:%d min:%d max:%d count:%d\\\\n\", sum/count, min, max, count}')",
+      "Bash(ATTEMPTS=128 RUN_ID_PREFIX=\"v128-20260607-pmax\" bash scripts/generate-all.sh)",
+      "WebFetch(domain:huggingface.co)"
     ]
   }
 }

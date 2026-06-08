@@ -23,7 +23,8 @@ pub struct ModelConfig {
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub project_root: PathBuf,
-    pub llama_server_binary: String,
+    /// Path to the uv project directory containing vLLM dependencies
+    pub uv_project_dir: String,
     pub port: u16,
     pub completion_attempts: usize,
     pub parallel: u32,
@@ -33,7 +34,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             project_root: PathBuf::from("."),
-            llama_server_binary: "llama-server".into(),
+            uv_project_dir: "tools/vllm".into(),
             port: 8080,
             completion_attempts: 128,
             parallel: 8,
@@ -55,17 +56,5 @@ impl PipelineConfig {
     #[must_use]
     pub fn checkpoint_dir(&self) -> PathBuf {
         self.project_root.join("results").join("checkpoints")
-    }
-
-    #[must_use]
-    pub fn llama_server_path(&self) -> PathBuf {
-        let candidate = self
-            .project_root
-            .join("tools/llama.cpp/build/bin/llama-server");
-        if candidate.exists() {
-            candidate
-        } else {
-            PathBuf::from(&self.llama_server_binary)
-        }
     }
 }

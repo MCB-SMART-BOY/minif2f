@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Generate 128 proof attempts per theorem for [miniF2F](https://github.com/openai/miniF2F) (488 theorems) using 6 Lean 4 theorem-proving LLMs. Output is two flat JSON files per model: raw output + extracted Lean code.
 
-**Stack**: Pure Rust. `llama-server` (C binary, child process) for GPU inference. Zero Python at runtime.
+**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
 
 ## Commands
 
@@ -22,8 +22,8 @@ cargo build --release      # optimized
 
 # CLI
 cargo run -- list-models
-cargo run -- generate -m <model> -p <gguf>                      # defaults: -n 128 --parallel 8
-cargo run -- generate -m <model> -p <gguf> -n 64 --parallel 12 # custom
+cargo run -- generate -m <model> -p data/models/<name>               # defaults: -n 128 --parallel 8
+cargo run -- generate -m <model> -p data/models/<name> -n 64 --parallel 12 # custom
 cargo run -- status --run-id v1
 
 # Scripts
@@ -40,14 +40,14 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
   ├─ 0. load_existing_results() → populate ResultsMap from prior JSON
   │      Merges raw_output + lean_code tuples from previous runs
   │
-  ├─ 1. InferenceEngine::start() → spawns llama-server
-  │      loads GGUF → GPU, waits /health
-  │      args: -ngl 99 --ctx-size <n> --parallel <n> --no-warmup
-  │      --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on
+  ├─ 1. InferenceEngine::start() → spawns vLLM via `uv run`
+  │      loads HF safetensors → GPU with FP8 quantization, waits /health
+  │      args: --quantization fp8 --max-model-len <n> --max-num-seqs <n>
+  │      --gpu-memory-utilization 0.92 --enforce-eager
   │
   ├─ 2. Continuous request pool (NO per-theorem barrier):
   │      All theorem×attempt jobs → stream::iter → buffer_unordered(N)
-  │      N = --parallel (concurrent HTTP requests in flight).
+  │      N = --parallel (vLLM --max-num-seqs, continuous batching).
   │      When one request completes, the next starts immediately.
   │      Results arrive in completion order → batched per theorem.
   │
@@ -55,7 +55,7 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
   │      rayon::par_iter() → parallel extract_proof() + validate_lean_code()
   │      Sequential BTreeMap insert → checkpoint → incremental JSON write
   │
-  ├─ 4. engine.stop() → kills llama-server, frees GPU
+  ├─ 4. engine.stop() → kills vLLM server, frees GPU
   │
   └─ 5. Write two flat JSON files (every 20 theorems + final):
        output/raw_output/<model>.json  — unfiltered completions
@@ -72,7 +72,7 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
 | `models.rs` | 6-model registry with per-model official specs | 6 |
 | `data.rs` | `Theorem` struct, JSONL loader, `make_proof_file()` | 3 |
 | `prompts.rs` | Chat templates + 4 prompt formats + proof extraction + validation | 21 |
-| `inference.rs` | `InferenceEngine`: llama-server lifecycle, HTTP `/completion` | 0 |
+| `inference.rs` | `InferenceEngine`: vLLM server lifecycle, HTTP `/v1/completions` | 0 |
 | `checkpoint.rs` | Atomic JSON-set crash recovery | 4 |
 | `pipeline.rs` | Continuous request pool → two-layer JSON output | 0 |
 
@@ -82,8 +82,8 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
 data/raw/minif2f.jsonl (488 theorems)
   → Theorem { name, split, header, informal_prefix, formal_statement }
   → prompts.rs: arch-specific chat template + 4 format-specific user prompts
-  → stream::iter(all_jobs).buffer_unordered(N) → HTTP POST /completion
-  → llama-server GPU inference (--parallel N concurrent slots)
+  → stream::iter(all_jobs).buffer_unordered(N) → HTTP POST /v1/completions
+  → vLLM GPU inference (FP8 quantization, continuous batching)
   → Per-theorem batch (configured attempts) → rayon::par_iter():
        extract_proof() → make_proof_file() → validate_lean_code()
   → ResultsMap: { theorem → { attempt_N → (raw_output, lean_code) } }
@@ -234,13 +234,13 @@ incremental writes, a crash loses all proofs generated since the last complete t
 
 ## Hardware
 
-- **GPU**: RTX 4060 8GB (Vulkan, `--parallel 2`) or RTX 5090 32GB (CUDA, `--parallel 7–24`)
-- **1.7B FP16**: ~3.2 GB. **7-8B**: Q4_K_M GGUF ~4-5 GB
-- llama-server: `-ngl 99 --parallel <n> --no-warmup --cache-type-k q8_0 --cache-type-v q8_0 --cache-reuse 256 --flash-attn on`
-- KV cache: shared paged pool (q8_0) — parallel does NOT linearly multiply VRAM
-- **Q4_K_M models are memory-bandwidth bound** (~1.7 TB/s RTX 5090): 7B ~4.5 GB → single-stream max ~378 t/s. With 16-way parallel → ~65-78 t/s per slot. Adding more parallel fragments bandwidth further (p=22 dropped to 57 t/s).
-- **GPU utilization**: 73% SM util is NORMAL for Q4_K_M — GPU cores wait on memory, not compute. Do not chase 90%+.
-- **Per-model parallel** (see `scripts/generate-all.sh` for current values): LLaMA-7B (no GQA, kv=256KB/tok) max p=16; Qwen3 (GQA, kv=64KB/tok) can push to p=24.
+- **GPU**: RTX 5090 32GB (CUDA) primary. RTX 4060 8GB (Vulkan) for testing.
+- **Models**: BF16 safetensors → FP8 quantization at load time (~7-8 GB VRAM per 7-8B model)
+- vLLM: `--quantization fp8 --max-num-seqs <n> --gpu-memory-utilization 0.92 --enforce-eager`
+- vLLM uses **PagedAttention** — KV cache is dynamically managed, more efficient than static slots
+- **FP8 quantization** cuts weight VRAM in half vs BF16, leaving ~24 GB for KV cache
+- **Per-model --max-num-seqs** (see `scripts/generate-all.sh` for current values): 9–38 depending on model VRAM needs
+- vLLM's **continuous batching** eliminates idle slot waste — requests are batched dynamically
 
 ## Model Conversion (one-time per model)
 

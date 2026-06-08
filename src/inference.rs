@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-/// Manages a llama-server process and provides an HTTP inference client.
+/// Manages a vLLM server process (via `uv run`) and provides an HTTP inference client.
 pub struct InferenceEngine {
     pub config: ModelConfig,
     client: Client,
@@ -15,97 +15,94 @@ pub struct InferenceEngine {
 }
 
 impl InferenceEngine {
-    /// Start llama-server and wait for it to be ready.
+    /// Start vLLM server via `uv run` and wait for it to be ready.
     ///
     /// # Errors
     ///
-    /// Returns an error if llama-server cannot be spawned, the health check
+    /// Returns an error if vLLM cannot be spawned, the health check
     /// times out, or the HTTP client cannot be created.
     pub async fn start(
         config: ModelConfig,
         model_path: &str,
         port: u16,
-        llama_server_binary: &str,
+        uv_project_dir: &str,
         parallel: u32,
     ) -> Result<Self> {
-        let child = Command::new(llama_server_binary)
+        // vLLM uses --max-num-seqs for max concurrent sequences
+        // --max-model-len caps the per-sequence context window
+        let max_model_len = (config.max_tokens + 4096).min(config.max_model_len);
+
+        // Resolve model path to absolute — vLLM requires absolute paths for local models
+        let model_path = std::path::absolute(model_path)
+            .context("Failed to resolve model path")?
+            .to_string_lossy()
+            .to_string();
+
+        // CUDA toolkit path for FlashInfer JIT compilation on Blackwell (SM 12.x)
+        let cu13 = format!("{uv_project_dir}/.venv/lib/python3.12/site-packages/nvidia/cu13");
+
+        let child = Command::new("uv")
             .args([
-                "-m",
-                model_path,
+                "run",
+                "--directory",
+                uv_project_dir,
+                "python",
+                "server.py",
+                &model_path,
                 "--port",
                 &port.to_string(),
-                "-ngl",
-                "99",
-                "--ctx-size",
-                &{
-                    // Each slot needs prompt + max_tokens (capped at model training limit).
-                    // llama-server divides ctx-size by --parallel: per_slot = ctx / parallel.
-                    // So: ctx = per_slot_needed * parallel
-                    let per_slot = (config.max_tokens + 4096).min(config.max_model_len);
-                    (per_slot * parallel).to_string()
-                },
-                "--batch-size",
-                "2048",
-                "--parallel",
+                "--max-model-len",
+                &max_model_len.to_string(),
+                "--max-num-seqs",
                 &parallel.to_string(),
-                "--cache-type-k",
-                "q8_0",
-                "--cache-type-v",
-                "q8_0",
-                "--cache-reuse",
-                "256",
-                "--flash-attn",
-                "on",
-                "--no-warmup",
-                "--api-key",
-                "minif2f",
+                "--gpu-memory-utilization",
+                "0.92",
+                "--dtype",
+                "half",
+                "--enforce-eager",
+                "--trust-remote-code",
             ])
+            .env("CUDA_HOME", &cu13)
+            .env("VLLM_USE_FLASHINFER_SAMPLER", "0")
+            .env("OMP_NUM_THREADS", "")
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(format!(
-                "/tmp/llama-server-{port}.log"
+                "/tmp/vllm-server-{port}.log"
             ))?)
             .spawn()
-            .context("Failed to start llama-server. Is llama.cpp installed?")?;
+            .context("Failed to start vLLM wrapper. Is `uv sync` done in tools/vllm/?")?;
 
         let base_url = format!("http://localhost:{port}");
 
         let engine = Self {
             config,
             client: Client::builder()
-                .timeout(Duration::from_mins(5))
-                .no_proxy()
+                .timeout(Duration::from_mins(10))
+                .no_proxy() // CRITICAL: bypass HTTP_PROXY for localhost
                 .build()?,
             server: child,
             base_url: base_url.clone(),
         };
 
-        // Wait for server to be ready (model loads async)
+        // Wait for vLLM to load the model and be ready
+        // vLLM model loading can take 30–120s depending on model size
         let health_url = format!("{base_url}/health");
         let start = std::time::Instant::now();
-        let timeout = Duration::from_mins(2);
+        let timeout = Duration::from_mins(5);
 
         loop {
             if start.elapsed() > timeout {
                 engine.kill();
                 anyhow::bail!(
-                    "llama-server did not become ready within {}s",
+                    "vLLM server did not become ready within {}s",
                     timeout.as_secs()
                 );
             }
-            match engine
-                .client
-                .get(&health_url)
-                .header("Authorization", "Bearer minif2f")
-                .send()
-                .await
-            {
+            match engine.client.get(&health_url).send().await {
                 Ok(resp) if resp.status().is_success() => break,
-                Ok(resp) if resp.status().as_u16() == 503 => {
-                    // Model is loading — keep waiting
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
                 Ok(_) | Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // Model is loading — keep waiting
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
         }
@@ -122,16 +119,22 @@ impl InferenceEngine {
         max_retries: usize,
     ) -> String {
         for attempt in 0..=max_retries {
-            match client
-                .post(url)
-                .header("Authorization", "Bearer minif2f")
-                .json(&body)
-                .send()
-                .await
-            {
+            match client.post(url).json(&body).send().await {
                 Ok(resp) => match resp.json::<Value>().await {
                     Ok(json) => {
-                        return json["content"].as_str().unwrap_or("").to_string();
+                        // OpenAI-compatible: choices[0].text
+                        let raw = json["choices"]
+                            .get(0)
+                            .and_then(|c| c["text"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        // Decode LLaMA byte-fallback encoding (vLLM tokenizer bug).
+                        // LLaMA tokenizer encodes bytes 0x00-0xFF as U+0100-U+01FF.
+                        // e.g. 0x20→U+0120(Ġ), 0x0A→U+010A(Ċ), 0xE2→U+01E2(â)
+                        // Multi-byte UTF-8 chars like ℕ(0xE2,0x84,0x95) become
+                        // â(U+01E2) + some_fallback(0x84) + some_fallback(0x95).
+                        // Fix: collect all U+0100-U+01FF as bytes, keep rest as UTF-8.
+                        return decode_llama_byte_fallback(&raw);
                     }
                     Err(e) if attempt < max_retries => {
                         eprintln!(
@@ -163,7 +166,7 @@ impl InferenceEngine {
 
     /// Generate n completions — returns a stream of (attempt_index, text) as
     /// each request completes. No barrier: results are yielded immediately,
-    /// keeping llama-server slots fed and GPU saturated.
+    /// keeping vLLM's continuous batching saturated.
     #[allow(clippy::cast_possible_truncation)]
     pub fn generate_stream(
         &self,
@@ -171,7 +174,7 @@ impl InferenceEngine {
         n: usize,
         attempt_offset: usize,
     ) -> FuturesUnordered<impl futures::Future<Output = (usize, String)>> {
-        let url = format!("{}/completion", self.base_url);
+        let url = format!("{}/v1/completions", self.base_url);
         let prompt = prompt.to_string();
         let client = self.client.clone();
         let max_tokens = self.config.max_tokens;
@@ -183,13 +186,14 @@ impl InferenceEngine {
         let futures: FuturesUnordered<_> = FuturesUnordered::new();
         for i in 0..n {
             let body = serde_json::json!({
+                "model": self.config.name,
                 "prompt": prompt,
-                "n_predict": max_tokens,
+                "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
                 "seed": base_seed.wrapping_add(attempt_offset as u64 + i as u64) as u32,
                 "stop": stop_sequences,
-                "n_probs": 0,
+                "stream": false,
             });
             let client = client.clone();
             let url = url.clone();
@@ -224,16 +228,20 @@ impl InferenceEngine {
         &self.client
     }
 
-    /// Access the llama-server base URL.
+    /// Access the vLLM server base URL.
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
     fn kill(&self) {
+        // Try graceful shutdown first (SIGTERM), then force kill
+        let pid = self.server.id();
         let _ = Command::new("kill")
-            .args(["-9", &self.server.id().to_string()])
+            .args(["-15", &pid.to_string()])
             .output();
+        std::thread::sleep(Duration::from_secs(2));
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
     }
 
     /// Shut down server immediately (frees GPU). Drop handles zombie reaping.
@@ -247,4 +255,34 @@ impl Drop for InferenceEngine {
         let _ = self.server.kill();
         let _ = self.server.wait();
     }
+}
+
+/// Decode LLaMA byte-fallback encoding from vLLM's output.
+///
+/// LLaMA tokenizer encodes raw bytes 0x00–0xFF as Unicode characters
+/// U+0100–U+01FF.  Characters outside that range are already valid UTF-8.
+/// This function reverses the fallback: collect byte-fallback chars into
+/// bytes, pass through everything else as UTF-8, then decode the result.
+/// Decode LLaMA byte-fallback + Latin-1 encoding from vLLM's output.
+///
+/// vLLM's tokenizer for LLaMA models emits a mix of:
+///   - Latin-1: bytes 0x80-0xFF → U+0080-U+00FF (e.g. 0xE2 → â)
+///   - Byte-fallback: bytes 0x00-0xFF → U+0100-U+01FF (e.g. 0x20 → Ġ)
+///
+/// Characters outside these ranges pass through as valid UTF-8.
+fn decode_llama_byte_fallback(text: &str) -> String {
+    let mut bytes: Vec<u8> = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let cp = ch as u32;
+        match cp {
+            0x0080..=0x00FF => bytes.push(cp as u8), // Latin-1 → raw byte
+            0x0100..=0x01FF => bytes.push((cp - 0x0100) as u8), // byte-fallback → raw byte
+            _ => {
+                let mut buf = [0u8; 4];
+                let len = ch.encode_utf8(&mut buf).len();
+                bytes.extend_from_slice(&buf[..len]);
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }

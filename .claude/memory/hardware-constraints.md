@@ -19,11 +19,16 @@ metadata:
 Q4_K_M quantized models are **memory-bandwidth bound**, not compute bound. RTX 5090 has ~1.7 TB/s bandwidth. A 7B Q4_K_M model (~4.5 GB) has a theoretical single-stream max of ~378 t/s. With parallel streams, bandwidth is shared:
 
 ```
-16-way parallel: ~1120 t/s total → ~70 t/s per slot
-22-way parallel: ~1250 t/s total → ~57 t/s per slot (4.5× per-slot drop!)
+LLaMA-7B (no GQA, kv=256KB/tok): bandwidth ceiling ~1,400-1,500 t/s total
+  16-way: ~1,470 t/s total → ~92 t/s per slot  ← sweet spot, more p won't help
+Qwen3 (GQA, kv=64KB/tok): 4× lighter KV → bandwidth ceiling higher
+  24-way: ~2,040 t/s total → ~85 t/s per slot  ← still room to push
 ```
 
-The sweet spot maximizes **total throughput** (p × per_slot_tps), not VRAM utilization. GPU SM utilization at 73% is NORMAL — cores wait on memory.
+Key insight: **VRAM-constrained models (p=7-8) are well below bandwidth ceiling**.
+Increasing their parallel has meaningful headroom. LLaMA-7B at p=16 is already
+at ceiling — more parallel would drop per-slot t/s enough to cancel the gain.
+GPU SM utilization at 73% is NORMAL — cores wait on memory.
 
 ## llama-server
 - Launch: `llama-server -m <gguf> --port <port> -ngl 99 --ctx-size <n> --parallel <n> --no-warmup --cache-type-k q8_0 --cache-type-v q8_0 --cache-reuse 256 --flash-attn on`
@@ -31,19 +36,22 @@ The sweet spot maximizes **total throughput** (p × per_slot_tps), not VRAM util
 - HTTP `/completion` endpoint with `/health` polling
 - Stderr → `/tmp/llama-server-{port}.log`
 
-## Per-model --parallel (RTX 5090 32GB, bandwidth-optimized)
+## Per-model --parallel (RTX 5090 32GB, VRAM-maximized for total throughput)
 
-| Model | Arch | Size | --parallel | ctx-size | Per-slot |
-|-------|------|------|-----------|----------|----------|
-| goedel-prover-dpo | LLaMA-7B | 7B | **16** | 65536 | 4096 |
-| deepseek-prover-v2-7b | LLaMA-7B | 7B | **7** | 86016 | 12288 |
-| kimina-prover-rl-1.7b | Qwen3 | 1.7B | **24** | 292608 | 12192 |
-| goedel-prover-v2-8b | Qwen3 | 8B | **8** | 294912 | 36864 |
-| kimina-prover-distill-8b | Qwen3 | 8B | **24** | 292608 | 12192 |
-| stp-model-lean | LLaMA-7B | 7B | **16** | 16384 | 1024 |
+| Model | Arch | Size | --parallel | ctx-size | Per-slot | VRAM est |
+|-------|------|------|-----------|----------|----------|----------|
+| goedel-prover-dpo | LLaMA-7B | 7B | **16** | 65536 | 4096 | ~21 GB |
+| deepseek-prover-v2-7b | LLaMA-7B | 7B | **9** | 110592 | 12288 | ~31 GB |
+| kimina-prover-rl-1.7b | Qwen3 | 1.7B | **38** | 463296 | 12192 | ~31 GB |
+| goedel-prover-v2-8b | Qwen3 | 8B | **12** | 442368 | 36864 | ~32 GB |
+| kimina-prover-distill-8b | Qwen3 | 8B | **36** | 438912 | 12192 | ~31 GB |
+| stp-model-lean | LLaMA-7B | 7B | **16** | 16384 | 1024 | ~8 GB |
 
-**LLaMA-7B** (no GQA, kv=256KB/tok): larger KV cache per token → fewer slots fit. p=16 is sweet spot.
-**Qwen3** (GQA, kv=64KB/tok): 4× smaller KV per token → can push higher parallel. 1.7B FP16 smaller model → even faster.
+**LLaMA-7B** (no GQA, kv=256KB/tok): bandwidth ceiling ~1,400-1,500 t/s total.
+Goedel-DPO p=16 already at ~1,470 t/s — no gain from more parallel.
+DeepSeek-V2 was at p=7 (VRAM-constrained, not bandwidth-constrained) → p=9.
+**Qwen3** (GQA, kv=64KB/tok): 4× lighter KV cache per token → can push 36-38
+parallel while staying under 32 GB. GQA models are VRAM-bound, not bandwidth-bound.
 
 ## ctx-size formula
 ```rust
@@ -55,8 +63,7 @@ llama-server divides ctx by parallel for per-slot context. Formula ensures each 
 ## Multi-model
 - Single port (8080), sequential execution
 - `./scripts/generate-all.sh` creates tmux session, runs models one at a time
-- ETA per model: 7B LLaMA ~4h, 8B Qwen3 ~6h, 1.7B Qwen3 ~0.5h. Total depends on enabled GGUFs in `scripts/generate-all.sh`.
+- ETA per model: 7B LLaMA ~4-11h, 8B Qwen3 ~17-67h, 1.7B Qwen3 ~5h. Total ~7 days.
 
-**Why:** Q4_K_M + memory bandwidth bottleneck means more parallel ≠ faster. The optimal parallel balances per-slot speed with total throughput.
-
+**Why:** Q4_K_M + memory bandwidth bottleneck means more parallel ≠ always faster. LLaMA-7B hits bandwidth ceiling at p=16. DeepSeek-V2 and Qwen3 models are VRAM-constrained below ceiling — pushing parallel higher has real gains.
 **How to apply:** Per-model parallel values are in `scripts/generate-all.sh` (MODELS array). For manual runs, use `--parallel` flag. Check `nvidia-smi` for VRAM, but don't chase GPU utilization — 73% is normal for Q4_K_M.

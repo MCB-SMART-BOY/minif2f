@@ -8,19 +8,20 @@ ATTEMPTS="${ATTEMPTS:-128}"
 SESSION="minif2f-gen"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-v128-$(date +%Y%m%d)}"
 
-# --parallel tuned for optimal throughput (not max VRAM):
-#   More slots = more memory bandwidth contention → per-slot t/s drops.
-#   Q4_K_M models are memory-bandwidth bound (~1.7 TB/s RTX 5090).
-#   7B Q4_K_M ~4.5 GB → single-stream max ~378 t/s, 16-way ~65-78 t/s each.
-#   LLaMA-7B (no GQA, kv=256KB/tok): p=16 is the sweet spot.
-#   Qwen3 (GQA, kv=64KB/tok): can push higher, less memory pressure.
+# --parallel = vLLM --max-num-seqs (empirically tested on RTX 5090 32 GB).
+#   Goedel-DPO: tested p=8✅ p=10✅ p=12⚠️(8/50 marginal fails)
+#   All other models estimated from Goedel-DPO baseline:
+#     available_KV = 30GB - model_weights, per_seq_KV = max_tokens * kv_per_tok
+#     p ≈ available_KV / (per_seq_KV * safety_factor)
+#   LLaMA-7B (no GQA, kv=512KB/tok FP16): KV-heavy, conservative.
+#   Qwen3 (GQA, kv=128KB/tok FP16): 4× lighter KV, can push higher.
 MODELS=(
-  "goedel-prover-dpo|models/goedel-prover-dpo.gguf|16"                        # LLaMA-7B, ctx=65536, ~70 t/s per slot
-  "deepseek-prover-v2-7b|models/deepseek-prover-v2-7b.gguf|7"                # LLaMA-7B, ctx=86016, per_slot=12288
-  "kimina-prover-rl-1.7b|models/kimina-1.7b.gguf|24"                         # Qwen3-1.7B, ctx=292608, per_slot=12192
-  "goedel-prover-v2-8b|models/goedel-prover-v2-8b.gguf|8"                    # Qwen3-8B, ctx=294912, per_slot=36864
-  "kimina-prover-distill-8b|models/kimina-prover-distill-8b.gguf|24"         # Qwen3-8B, ctx=292608, per_slot=12192
-  "stp-model-lean|models/stp-model-lean.gguf|16"                             # DS-Prover-V1.5, ctx=16384, per_slot=1024
+  "goedel-prover-dpo|data/models/goedel-prover-dpo|10"                        # LLaMA-7B, 13GB, tested p=10✅ p=12⚠️
+  "deepseek-prover-v2-7b|data/models/deepseek-prover-v2-7b|6"                # LLaMA-7B, 13GB+long ctx(8192) → conservative p=6
+  "kimina-prover-rl-1.7b|data/models/kimina-prover-rl-1.7b|38"               # Qwen3-1.7B, 3.4GB+GQA, light model → p=38
+  "goedel-prover-v2-8b|data/models/goedel-prover-v2-8b|8"                   # Qwen3-8B, 16GB+very long ctx(32768) → p=8
+  "kimina-prover-distill-8b|data/models/kimina-prover-distill-8b|30"         # Qwen3-8B, 16GB+GQA → p=30
+  "stp-model-lean|data/models/stp-model-lean|16"                             # DS-Prover-V1.5, 13GB+short ctx(1024) → p=16
 )
 
 main() {
@@ -40,8 +41,8 @@ main() {
     local ready=0 total=0
     for entry in "${MODELS[@]}"; do
         total=$((total + 1))
-        IFS='|' read -r _ gguf _parallel <<< "$entry"
-        if [[ -f "$gguf" ]]; then ready=$((ready + 1)); fi
+        IFS='|' read -r _ model_path _parallel <<< "$entry"
+        if [[ -d "$model_path" ]]; then ready=$((ready + 1)); fi
     done
     echo "  Ready: $ready/$total models, ${ATTEMPTS} attempts each, sequential"
     echo "  --parallel: per-model values from MODELS array"
@@ -63,10 +64,10 @@ RUN_ID_PREFIX="${RUN_ID_PREFIX:-v128}"
 models=("$@")
 
 for entry in "${models[@]}"; do
-    IFS='|' read -r name gguf parallel <<< "$entry"
+    IFS='|' read -r name model_path parallel <<< "$entry"
     parallel="${parallel:-8}"
-    if [[ ! -f "$gguf" ]]; then
-        echo -e "${RED}SKIP $name — GGUF not found${NC}"
+    if [[ ! -d "$model_path" ]]; then
+        echo -e "${RED}SKIP $name — model directory not found: $model_path${NC}"
         continue
     fi
     run_id="${RUN_ID_PREFIX}-${name}"
@@ -77,8 +78,20 @@ for entry in "${models[@]}"; do
     echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Kill any orphaned llama-server
+    # Kill any orphaned vLLM server and all subprocesses
+    # vLLM's EngineCore is a separate process that may hold GPU memory + port
+    # after the parent exits. We aggressively clean everything.
     fuser -k "$PORT/tcp" 2>/dev/null || true
+    # Kill all vLLM/EngineCore orphan processes
+    pkill -f "VLLM::EngineCore" 2>/dev/null || true
+    pkill -f "server.py" 2>/dev/null || true
+    # Wait until port is truly free (up to 60s)
+    for _ in $(seq 1 30); do
+        if ! fuser "$PORT/tcp" 2>/dev/null; then
+            break
+        fi
+        sleep 2
+    done
     sleep 2
 
     # Retry loop — transient failures self-heal
@@ -86,7 +99,7 @@ for entry in "${models[@]}"; do
     while ((attempt <= max_attempts)); do
         echo -e "  Attempt $attempt/$max_attempts..."
         if cargo run --release -- generate \
-            -m "$name" -p "$gguf" \
+            -m "$name" -p "$model_path" \
             --port "$PORT" -n "$ATTEMPTS" \
             --parallel "$parallel" \
             --run-id "$run_id"; then
@@ -122,8 +135,8 @@ WORKEREOF
     # Collect available models
     local model_args=()
     for entry in "${MODELS[@]}"; do
-        IFS='|' read -r _ gguf _parallel <<< "$entry"
-        if [[ -f "$gguf" ]]; then
+        IFS='|' read -r _ model_path _parallel <<< "$entry"
+        if [[ -d "$model_path" ]]; then
             model_args+=("$entry")
         fi
     done

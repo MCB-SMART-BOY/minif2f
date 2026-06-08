@@ -23,19 +23,19 @@ enum Commands {
         /// Model name
         #[arg(short, long)]
         model: String,
-        /// Path to GGUF model file
+        /// Path to model directory (HuggingFace safetensors)
         #[arg(short = 'p', long)]
         model_path: String,
         /// Run ID for checkpointing
         #[arg(long, default_value = "default")]
         run_id: String,
-        /// Port for llama-server (use different ports for parallel runs)
+        /// Port for vLLM server (use different ports for parallel runs)
         #[arg(long, default_value = "8080")]
         port: u16,
         /// Number of attempts per theorem [default: 128]
         #[arg(short = 'n', long, default_value = "128")]
         attempts: usize,
-        /// llama-server parallel slots [default: 8]
+        /// vLLM max concurrent sequences [default: 8]
         #[arg(long, default_value = "8")]
         parallel: u32,
     },

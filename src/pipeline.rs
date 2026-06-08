@@ -45,21 +45,16 @@ impl EvaluationPipeline {
         println!("   Theorems: {}", theorems.len());
 
         // ── Start inference engine ──────────────────────────────────────
-        println!("\n🔧 Starting llama-server...");
-        let llama_server_bin = self
-            .config
-            .llama_server_path()
-            .to_string_lossy()
-            .to_string();
+        println!("\n🔧 Starting vLLM server...");
         let engine = InferenceEngine::start(
             model_cfg.clone(),
             model_path,
             self.config.port,
-            &llama_server_bin,
+            &self.config.uv_project_dir,
             self.config.parallel,
         )
         .await?;
-        println!("   ✅ llama-server ready");
+        println!("   ✅ vLLM server ready");
 
         // ── Prepare output directories ──────────────────────────────────
         println!("\n🧠 Generating proofs...");
@@ -118,7 +113,7 @@ impl EvaluationPipeline {
         use futures::stream::{self, StreamExt as _};
 
         let concurrency = self.config.parallel as usize;
-        let url = format!("{}/completion", engine.base_url());
+        let url = format!("{}/v1/completions", engine.base_url());
         let client = engine.http_client().clone();
         let max_tokens = model_cfg.max_tokens;
         let temperature = model_cfg.temperature;
