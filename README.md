@@ -2,7 +2,7 @@
 
 Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/miniF2F)'s 488 theorems using 6 Lean 4 theorem-proving LLMs. Output is two flat JSON files per model: raw output + extracted Lean code.
 
-**Stack**: Pure Rust + llama.cpp (inference). Zero Python at runtime.
+**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
 
 ## Quick Start
 
@@ -34,8 +34,8 @@ Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/mini
 
 ```bash
 cargo run -- list-models
-cargo run -- generate -m <model> -p <gguf>                         # defaults: -n 128 --parallel 8
-cargo run -- generate -m <model> -p <gguf> -n 64 --parallel 12    # custom
+cargo run -- generate -m <model> -p data/models/<name>               # defaults: -n 128 --parallel 8
+cargo run -- generate -m <model> -p data/models/<name> -n 64 --parallel 12 # custom
 cargo run -- status --run-id <id>
 ```
 
@@ -43,11 +43,11 @@ cargo run -- status --run-id <id>
 
 ```
 -m, --model <NAME>       Model name (required)
--p, --model-path <PATH>  Path to GGUF file (required)
---port <PORT>           llama-server port [default: 8080]
+-p, --model-path <PATH>  Path to model directory (required)
+--port <PORT>           vLLM server port [default: 8080]
 --run-id <ID>           Checkpoint ID [default: default]
 -n, --attempts <N>      Attempts per theorem [default: 128]
---parallel <N>          llama-server parallel slots [default: 8]
+--parallel <N>          vLLM --max-num-seqs (continuous batching) [default: 8]
 ```
 
 ## Output
@@ -92,7 +92,7 @@ output/
     ├── models.rs          # 6-model registry
     ├── data.rs            # Dataset + Theorem
     ├── prompts.rs         # Chat templates + proof extraction
-    ├── inference.rs       # llama-server manager
+    ├── inference.rs       # vLLM server manager
     ├── checkpoint.rs      # Crash recovery
     └── pipeline.rs        # Orchestrator → two-layer JSON
 ```
@@ -101,10 +101,10 @@ output/
 
 | Model | Architecture | Chat Template | Prompt | ctx | max_tok | temp | top_p | seed |
 |-------|-------------|---------------|--------|-----|---------|------|-------|------|
-| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 131K | 8096 | 0.6 | 0.95 | 42 |
+| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 40960 | 8096 | 0.6 | 0.95 | 42 |
 | goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 40960 | 32768 | 0.6 | 0.95 | 30 |
-| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2 | 32K | 8192 | 0.6 | 0.95 | 30 |
-| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 131K | 8096 | 0.6 | 0.95 | 42 |
+| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2_nocot | 65536 | 8192 | 0.6 | 0.95 | 30 |
+| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 40960 | 8096 | 0.6 | 0.95 | 42 |
 | goedel-prover-dpo | Raw | none | simple | 4096 | 2048 | 1.0 | 0.95 | 1 |
 | stp-model-lean | Raw | none | deepseek_prover | 1024 | 1024 | 1.0 | 1.0 | 1 |
 
@@ -126,7 +126,7 @@ output/
 ## Hardware
 
 - **GPU**: RTX 4060 8GB (Vulkan, `--parallel 2`) / RTX 5090 32GB (CUDA, `--parallel 48–128`)
-- **1.7B FP16**: ~3.2 GB VRAM. **7-8B**: Q4_K_M GGUF ~4-5 GB
+- **BF16 safetensors → FP8 quantized at load time**: ~7-8 GB VRAM per 7-8B model
 - **KV cache**: q8_0 quantization, shared paged pool — `--parallel` does NOT linearly multiply VRAM
 
 ## Quality

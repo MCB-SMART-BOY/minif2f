@@ -38,7 +38,7 @@ impl PromptBuilder {
 
             // ── DeepSeek V2 — Unicode fullwidth ｜ ────────────────────────
             // NOTE: BOS (<｜begin▁of▁sentence｜>) is added automatically by
-            // llama-server via tokenizer config (add_bos_token).  Including it
+            // vLLM via tokenizer config (add_bos_token).  Including it
             // here produces a double BOS and a warning at every request.
             "deepseek_v2" => format!(
                 "{}<｜User｜>{}<｜Assistant｜>",
@@ -87,7 +87,8 @@ impl PromptBuilder {
     fn build_user_message(&self, theorem: &Theorem) -> String {
         let fmt = self.config.prompt_format.to_lowercase();
         match fmt.as_str() {
-            "goedel_v2" => Self::build_goedel_v2(theorem),
+            "goedel_v2" => Self::build_goedel_v2(theorem, true),
+            "goedel_v2_nocot" => Self::build_goedel_v2(theorem, false),
             "simple" => Self::build_simple(theorem),
             "deepseek_prover" => Self::build_deepseek_prover(theorem),
             _ => Self::build_kimina(theorem), // default: kimina format
@@ -113,20 +114,33 @@ impl PromptBuilder {
         msg
     }
 
-    /// Goedel V2 / DeepSeek Prover V2 format (official):
-    /// "Complete the following Lean 4 code: ..." with `sorry` placeholder,
-    /// preceded by a proof plan request. Model outputs proof plan + code.
-    fn build_goedel_v2(theorem: &Theorem) -> String {
+    /// Goedel V2 / DeepSeek Prover V2 format.
+    ///
+    /// Both modes from the official papers (Goedel-Prover-V2 arXiv 2508.03613,
+    /// DeepSeek-Prover-V2 arXiv 2504.21801 Appendix A).
+    ///
+    /// CoT mode: closed code block + proof plan request.  Model outputs a
+    /// natural-language proof plan followed by a new ```lean4 code block.
+    ///
+    /// Non-CoT mode: closed code block only.  Model outputs a new ```lean4
+    /// code block directly (avg 443 tokens for 7B — Table 3 of DS paper).
+    fn build_goedel_v2(theorem: &Theorem, cot: bool) -> String {
         let formal_block = theorem_block(theorem, true);
         let formal_with_sorry = format!("{}\n  sorry", formal_block.trim_end());
 
-        format!(
-            "Complete the following Lean 4 code:\n\n```lean4\n{formal_with_sorry}```\n\n\
-             Before producing the Lean 4 code to formally prove the given theorem, provide \
-             a detailed proof plan outlining the main proof steps and strategies.\n\
-             The plan should highlight key ideas, intermediate lemmas, and proof structures \
-             that will guide the construction of the final formal proof."
-        )
+        let base =
+            format!("Complete the following Lean 4 code:\n\n```lean4\n{formal_with_sorry}\n```");
+
+        if cot {
+            format!(
+                "{base}\nBefore producing the Lean 4 code to formally prove the given theorem, \
+                 provide a detailed proof plan outlining the main proof steps and strategies.\n\
+                 The plan should highlight key ideas, intermediate lemmas, and proof structures \
+                 that will guide the construction of the final formal proof."
+            )
+        } else {
+            base
+        }
     }
 
     /// Goedel-Prover-DPO official format:
@@ -170,7 +184,7 @@ impl PromptBuilder {
     /// 4. Last resort: strip think/chat/markdown, validate body exists
     #[must_use]
     pub fn extract_proof(&self, raw: &str) -> String {
-        // Find the ```lean4 block AFTER </think> (if present)
+        // Find the ```lean4 block AFTER </think> (if present — Kimina models)
         let search_from = raw.find("</think>").map_or(0, |p| p + "</think>".len());
         let after_think = &raw[search_from..];
 
@@ -182,11 +196,26 @@ impl PromptBuilder {
             }
         }
 
-        // Fallback: search entire text for any fenced code
-        if let Some(code) = extract_fenced_code(raw) {
-            let cleaned = strip_markdown_from_proof(&code);
-            if has_proof_body(&cleaned) {
-                return cleaned;
+        // For chat models, the raw text includes the prompt (with its own
+        // ```lean4 block containing `sorry`). Search only the model's output —
+        // after the last assistant marker. Skip the full-text fallback since
+        // it would match the prompt's code block, not the model's.
+        let after_assistant = find_model_output_start(raw);
+        let is_chat = after_assistant > 0;
+        if is_chat {
+            if let Some(code) = extract_fenced_code(&raw[after_assistant..]) {
+                let cleaned = strip_markdown_from_proof(&code);
+                if has_proof_body(&cleaned) {
+                    return cleaned;
+                }
+            }
+        } else {
+            // Raw architecture — entire text is model output
+            if let Some(code) = extract_fenced_code(raw) {
+                let cleaned = strip_markdown_from_proof(&code);
+                if has_proof_body(&cleaned) {
+                    return cleaned;
+                }
             }
         }
 
@@ -292,8 +321,30 @@ fn extract_problem_desc(prefix: &str) -> String {
 
 // ── Proof extraction helpers ────────────────────────────────────────────
 
+/// Find where the model's output begins in the raw text.
+/// For chat models, returns the byte position after the last assistant marker.
+/// For raw architectures (no chat markers), returns 0 (search entire text).
+fn find_model_output_start(raw: &str) -> usize {
+    // Qwen3 ChatML
+    if let Some(pos) = raw.rfind("<|im_start|>assistant\n") {
+        return pos + "<|im_start|>assistant\n".len();
+    }
+    // DeepSeek V2 (Unicode fullwidth ｜)
+    if let Some(pos) = raw.rfind("<｜Assistant｜>") {
+        return pos + "<｜Assistant｜>".len();
+    }
+    // DeepSeek Coder
+    if let Some(pos) = raw.rfind("### Response:\n") {
+        return pos + "### Response:\n".len();
+    }
+    // Raw architecture — entire text is model output
+    0
+}
+
 /// Find the best fenced code block in the text.
 /// Returns the block with the most content after stripping the theorem header.
+/// Language-agnostic fence openers (` ``` `, ` ```\n`) have their first-line
+/// language specifier stripped to avoid including "tactics" etc. as code.
 fn extract_fenced_code(text: &str) -> Option<String> {
     let mut best: Option<String> = None;
     let mut best_len = 0;
@@ -306,13 +357,21 @@ fn extract_fenced_code(text: &str) -> Option<String> {
         "```\n",
         "```",
     ] {
+        let is_bare_fence = fence_start == "```" || fence_start == "```\n";
         let mut search_from = 0;
         while let Some(pos) = text[search_from..].find(fence_start) {
             let abs_pos = search_from + pos;
             let start = abs_pos + fence_start.len();
             let rest = &text[start..];
             if let Some(end) = rest.find("```") {
-                let code = rest[..end].trim().to_string();
+                let raw_code = rest[..end].trim().to_string();
+                // Bare ``` fences include the language specifier (e.g. "tactics")
+                // as the first line. Strip it so it doesn't become "proof" content.
+                let code = if is_bare_fence {
+                    strip_fence_lang_specifier(&raw_code)
+                } else {
+                    raw_code
+                };
                 let stripped = strip_theorem_header(&code);
                 let stripped_len = stripped.trim().len();
                 if stripped_len > best_len {
@@ -326,6 +385,26 @@ fn extract_fenced_code(text: &str) -> Option<String> {
         }
     }
     best
+}
+
+/// Strip the language specifier from the first line of a fenced code block.
+/// Bare ``` fences (without a language tag) include the tag as the first line.
+/// e.g. "tactics\nimport Mathlib..." → "import Mathlib..."
+fn strip_fence_lang_specifier(code: &str) -> String {
+    if let Some(first_newline) = code.find('\n') {
+        let first_line = &code[..first_newline].trim();
+        // Language specifiers are single words (no spaces, no Lean syntax)
+        if !first_line.is_empty()
+            && !first_line.contains(' ')
+            && !first_line.contains('/')
+            && first_line
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return code[first_newline + 1..].trim().to_string();
+        }
+    }
+    code.to_string()
 }
 
 /// Check if the text looks like a proof body (starts with tactic-like content,
@@ -343,7 +422,7 @@ fn is_proof_body(text: &str) -> bool {
     ) {
         return false;
     }
-    if trimmed.starts_with("```") {
+    if trimmed.starts_with("```") || trimmed.starts_with('#') {
         return false;
     }
     // Reject natural language commentary: first word is English prose starter
@@ -369,6 +448,12 @@ fn has_proof_body(code: &str) -> bool {
     if trimmed.len() < 2 || trimmed.starts_with('`') {
         return false;
     }
+    // Reject `sorry` — indicates the prompt's code block was extracted
+    // instead of the model's output (models should replace `sorry`, not
+    // leave it in place).
+    if trimmed.contains("sorry") {
+        return false;
+    }
     // Reject natural language commentary (model explains the proof instead of
     // writing Lean tactics).  Commentary starts with an English sentence
     // (capital letter + many prose words).  Valid Lean tactics are lowercase
@@ -385,7 +470,8 @@ fn strip_markdown_from_proof(code: &str) -> String {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            !trimmed.starts_with("# ") && !trimmed.starts_with("## ") && !trimmed.starts_with("**")
+            // Reject all markdown heading levels (#, ##, ###, ...) and bold markers
+            !trimmed.starts_with('#') && !trimmed.starts_with("**")
         })
         .collect();
     lines.join("\n")
@@ -645,14 +731,40 @@ mod tests {
         assert!(prompt.contains("sorry"));
         // Official: user message only, no system prompt
         assert!(!prompt.contains("<|im_start|>system"));
-        // Official: closing ``` on same line as last content line, not on new line
+        // Official: `sorry` and closing ``` on separate lines
         assert!(
-            prompt.contains("sorry```"),
-            "closing ``` must be on same line"
+            prompt.contains("sorry\n```"),
+            "CoT: closing ``` must be on its own line after 'sorry'"
         );
         assert!(
             !prompt.contains(":= by\n\n  sorry"),
             "`sorry` should directly follow `:= by` without an extra blank line"
+        );
+    }
+
+    #[test]
+    fn test_goedel_v2_nocot_format() {
+        let cfg = crate::models::find_model("deepseek-prover-v2-7b").unwrap();
+        assert_eq!(cfg.prompt_format, "goedel_v2_nocot");
+        let pb = PromptBuilder::new(cfg);
+        let t = make_theorem();
+        let prompt = pb.build(&t);
+        assert!(prompt.contains("Complete the following Lean 4 code"));
+        // Non-CoT: no proof plan request
+        assert!(!prompt.contains("proof plan"));
+        assert!(!prompt.contains("Before producing"));
+        assert!(prompt.contains("import Mathlib"));
+        assert!(prompt.contains("sorry"));
+        // No system prompt
+        assert!(!prompt.contains("<|im_start|>system"));
+        // Non-CoT: closed code block per Appendix A.1 of DS paper
+        assert!(
+            prompt.contains("sorry\n```"),
+            "non-CoT: closing ``` must be on its own line after 'sorry' (Appendix A.1)"
+        );
+        assert!(
+            !prompt.contains("proof plan"),
+            "non-CoT: no proof plan request"
         );
     }
 
@@ -903,6 +1015,62 @@ mod tests {
         assert!(!is_proof_body("lemma baz : qux := by"));
         assert!(!is_proof_body("import Mathlib"));
         assert!(!is_proof_body("```"));
+        // Reject markdown headers (any level)
+        assert!(!is_proof_body("# Analysis"));
+        assert!(!is_proof_body("## Step 1"));
+        assert!(!is_proof_body("### Detailed Proof and Analysis"));
+        assert!(!is_proof_body("#### Sub-step"));
+        // /-- doc comments are valid Lean, but the strip_theorem_header
+        // should have already removed them from the proof body
+        assert!(is_proof_body("/-- a comment about the proof -/"));
+        assert!(is_proof_body("-- a line comment"));
+    }
+
+    #[test]
+    fn test_strip_fence_lang_specifier() {
+        // Language specifiers are stripped
+        assert_eq!(
+            strip_fence_lang_specifier("tactics\nimport Mathlib\ntheorem foo := by\n  rfl"),
+            "import Mathlib\ntheorem foo := by\n  rfl"
+        );
+        assert_eq!(
+            strip_fence_lang_specifier("lean4\nimport Mathlib\n  rfl"),
+            "import Mathlib\n  rfl"
+        );
+        // Non-language first lines are left intact
+        assert_eq!(
+            strip_fence_lang_specifier("import Mathlib\ntheorem foo := by\n  rfl"),
+            "import Mathlib\ntheorem foo := by\n  rfl"
+        );
+        // Single word with spaces is NOT a language specifier
+        assert_eq!(
+            strip_fence_lang_specifier("have h : x = y := by\n  rfl"),
+            "have h : x = y := by\n  rfl"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_rejects_all_heading_levels() {
+        // #, ##, ###, #### etc. all filtered
+        let code = "# H1\n## H2\n### H3\n  rfl\n**bold**";
+        let result = strip_markdown_from_proof(code);
+        assert!(!result.contains('#'));
+        assert!(!result.contains("**"));
+        assert!(result.contains("rfl"));
+    }
+
+    #[test]
+    fn test_extract_proof_rejects_markdown_only_output() {
+        // deepseek style: outputs only "### Detailed Proof" with no Lean code
+        let cfg = crate::models::find_model("deepseek-prover-v2-7b").unwrap();
+        let pb = PromptBuilder::new(cfg);
+        let raw = "<｜User｜>Complete the following Lean 4 code:\n\n```lean4\nimport Mathlib\ntheorem foo : 1 = 1 := by\n  sorry\n```<｜Assistant｜>\n\n### Detailed Proof and Analysis\n\nWe can prove this by...";
+        let proof = pb.extract_proof(raw);
+        // The English-only "proof" should be rejected
+        assert!(
+            proof.is_empty(),
+            "English-only output must be rejected, got: {proof:?}"
+        );
     }
 
     #[test]

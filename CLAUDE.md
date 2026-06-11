@@ -71,7 +71,7 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
 | `config.rs` | `ModelConfig` (serde), `PipelineConfig` | 0 |
 | `models.rs` | 6-model registry with per-model official specs | 6 |
 | `data.rs` | `Theorem` struct, JSONL loader, `make_proof_file()` | 3 |
-| `prompts.rs` | Chat templates + 4 prompt formats + proof extraction + validation | 21 |
+| `prompts.rs` | Chat templates + 5 prompt formats + proof extraction + validation | 21 |
 | `inference.rs` | `InferenceEngine`: vLLM server lifecycle, HTTP `/v1/completions` | 0 |
 | `checkpoint.rs` | Atomic JSON-set crash recovery | 4 |
 | `pipeline.rs` | Continuous request pool → two-layer JSON output | 0 |
@@ -134,7 +134,7 @@ The current architecture uses **buffer_unordered + rayon parallel extraction**:
 stream::iter(all_jobs)               Per-theorem accumulation
   .buffer_unordered(N)               BTreeMap<name, Vec<(idx, text)>>
   │                                  │
-  ├─ HTTP POST → llama-server        ├─ Batch reaches attempts → flush
+  ├─ HTTP POST → vLLM /v1/completions  ├─ Batch reaches attempts → flush
   ├─ N requests in flight            │
   ├─ GPU saturated (~90%+)           ├─ rayon::par_iter():
   └─ Results in completion order     │    extract_proof()
@@ -191,12 +191,13 @@ Key functions:
 - `validate_lean_code`: 8-layer validation gate — rejects incomplete/wrong/commentary-only proofs
 - `extract_lean_from_text`: checks `line.starts_with(' ')` (before trim) for indented tactics
 
-## Prompt Formats (4 total)
+## Prompt Formats (5 total)
 
 | Format | Used by | Input | `sorry` | Content |
 |--------|---------|-------|---------|---------|
 | `kimina` | kimina-rl-1.7b, kimina-distill-8b | Chat (system+user) | No | "Think about and solve..." with `# Problem:` and `# Formal statement:` |
-| `goedel_v2` | goedel-v2-8b, deepseek-prover-v2-7b | Chat (user only) | Yes | "Complete the following Lean 4 code:" + proof plan request |
+| `goedel_v2` | goedel-v2-8b | Chat (user only) | Yes | "Complete the following Lean 4 code:" + proof plan request (CoT) |
+| `goedel_v2_nocot` | deepseek-prover-v2-7b | Chat (user only) | Yes | "Complete the following Lean 4 code:" only — no proof plan (non-CoT) |
 | `simple` | goedel-prover-dpo | Completion (raw) | No | "Complete... with explanatory comments..." + open code block |
 | `deepseek_prover` | stp-model-lean | **Completion** (raw) | **No** | "Complete the following Lean 4 code:" + open code block (from `:= by`, no `informal_prefix`) |
 
@@ -204,11 +205,11 @@ Key functions:
 
 | CLI Name | Arch | Base | ctx | max_tok | temp | top_p | seed | Prompt | SysPrompt |
 |----------|------|------|-----|---------|------|-------|------|--------|-----------|
-| `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | **131K** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | **40960** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
 | `goedel-prover-dpo` | **raw** | LLaMA-7B | 4096 | **2048** | 1.0 | 0.95 | 1 | simple | _(none)_ |
 | `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | **40960** | **32768** | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
-| `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | **32K** | 8192 | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
-| `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | **131K** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | **65536** | 8192 | 0.6 | 0.95 | 30 | **goedel_v2_nocot** | _(none)_ |
+| `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | **40960** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
 | `stp-model-lean` | **raw** | DS-Prover-V1.5 | **1024** | **1024** | 1.0 | 1.0 | 1 | **deepseek_prover** | _(none)_ |
 
 Bold values are sourced from explicit HuggingFace model cards, HuggingFace `config.json` / `tokenizer_config.json`, or official eval scripts. When those sources differ, `ctx` follows the model card if it explicitly sets `max_model_len`; otherwise it follows model `config.json` (`max_position_embeddings`).
@@ -217,9 +218,9 @@ Bold values are sourced from explicit HuggingFace model cards, HuggingFace `conf
 1. Goedel-Prover-DPO — raw completion prompt. Prompt: "Complete the following Lean 4 code with explanatory comments..." + open ```lean4 block. `full_code = extract_code(model_input + model_output)` in the official eval script. EOS=100001, max_tokens=2048, temperature=1.0, top_p=0.95, seed=1.
 2. Kimina-Prover-RL-1.7B — Qwen3 ChatML. System: "expert in mathematics and proving theorems in Lean 4". Prompt: "Think about and solve..." with `# Problem:` and `# Formal statement:`. NO `sorry` — theorem ends with `:= by`. EOS=151645, max_tokens=8096.
 3. Goedel-Prover-V2-8B — Qwen3 ChatML, user message only (NO system prompt). Prompt: "Complete the following Lean 4 code:" + proof plan request. `formal_statement` includes `sorry`. EOS=151645, `max_position_embeddings=40960`, max_new_tokens=32768, seed=30.
-4. DeepSeek-Prover-V2-7B — DeepSeek V2 ChatML, user message only (NO system prompt). Same prompt as Goedel-V2. EOS=100001, 32K context, max_new_tokens=8192, seed=30.
+4. DeepSeek-Prover-V2-7B — DeepSeek V2 ChatML, user message only (NO system prompt). Uses **non-CoT** prompt (no proof plan request). EOS=100001, 65536 context (config.json), max_new_tokens=8192, seed=30.
 5. Kimina-Prover-Distill-8B — Qwen3 ChatML. System: "expert in mathematics and Lean 4". Same prompt as Kimina-RL. NO `sorry`. EOS=151645, max_tokens=8096.
-6. STP_model_Lean — Completion (NOT chat). `max_model_len=1024`, `max_tokens=1024`, `temperature=1.0`, `top_p=1.0`, seed=1. Prompt: "Complete the following Lean 4 code:" + open ```lean4 block with header+statement (no informal_prefix). `statement = formal_statement.rsplit('sorry', 1)[0].strip()`. EOS=100001.
+6. STP_model_Lean — Completion (NOT chat). `max_model_len=1024` (official eval), `max_tokens=1024`, `temperature=1.0`, `top_p=1.0`, seed=1. Prompt: "Complete the following Lean 4 code:" + open ```lean4 block with header+statement (no informal_prefix). `statement = formal_statement.rsplit('sorry', 1)[0].strip()`. EOS=100001.
 
 ## Checkpointing
 

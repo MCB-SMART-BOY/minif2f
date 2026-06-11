@@ -15,13 +15,15 @@ RUN_ID_PREFIX="${RUN_ID_PREFIX:-v128-$(date +%Y%m%d)}"
 #     p ≈ available_KV / (per_seq_KV * safety_factor)
 #   LLaMA-7B (no GQA, kv=512KB/tok FP16): KV-heavy, conservative.
 #   Qwen3 (GQA, kv=128KB/tok FP16): 4× lighter KV, can push higher.
+# Model order: un-run models first, completed models re-run last.
+# kimina-prover-rl-1.7b is currently running in the existing tmux session.
 MODELS=(
-  "goedel-prover-dpo|data/models/goedel-prover-dpo|10"                        # LLaMA-7B, 13GB, tested p=10✅ p=12⚠️
-  "deepseek-prover-v2-7b|data/models/deepseek-prover-v2-7b|6"                # LLaMA-7B, 13GB+long ctx(8192) → conservative p=6
-  "kimina-prover-rl-1.7b|data/models/kimina-prover-rl-1.7b|38"               # Qwen3-1.7B, 3.4GB+GQA, light model → p=38
-  "goedel-prover-v2-8b|data/models/goedel-prover-v2-8b|8"                   # Qwen3-8B, 16GB+very long ctx(32768) → p=8
-  "kimina-prover-distill-8b|data/models/kimina-prover-distill-8b|30"         # Qwen3-8B, 16GB+GQA → p=30
-  "stp-model-lean|data/models/stp-model-lean|16"                             # DS-Prover-V1.5, 13GB+short ctx(1024) → p=16
+  "goedel-prover-v2-8b|data/models/goedel-prover-v2-8b|16"                  # 🆕 Qwen3-8B, GQA, CoT~5K-21K tok/req → KVcache 0.7-3GB/seq. p=16 fits 22GB KV cache.
+  "kimina-prover-distill-8b|data/models/kimina-prover-distill-8b|48"         # 🆕 Qwen3-8B, GQA, ctx(8096) → p=48 (↑36→48)
+  "stp-model-lean|data/models/stp-model-lean|64"                             # 🆕 DS-Prover-V1.5, ctx(1024) → p=64 (↑32→64)
+  "goedel-prover-dpo|data/models/goedel-prover-dpo|40"                       # 🔄 LLaMA-7B, no GQA, KV 54MB/seq → p=40 (↑24→40, KV非瓶颈)
+  "deepseek-prover-v2-7b|data/models/deepseek-prover-v2-7b|32"              # 🔄 LLaMA-7B, non-CoT 443tok/seq → KV 208MB/seq → p=32 (↑20→32, KV非瓶颈)
+  "kimina-prover-rl-1.7b|data/models/kimina-prover-rl-1.7b|64"               # 🔄 Qwen3-1.7B, FP8~2GB, GQA → p=64 (↑48→64)
 )
 
 main() {

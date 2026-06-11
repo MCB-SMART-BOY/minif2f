@@ -131,12 +131,11 @@ impl EvaluationPipeline {
                     i,
                     serde_json::json!({
                         "prompt": &prompt,
-                        "n_predict": max_tokens,
+                        "max_tokens": max_tokens,
                         "temperature": temperature,
                         "top_p": top_p,
                         "seed": base_seed.wrapping_add(i as u64) as u32,
                         "stop": &stop_sequences,
-                        "n_probs": 0,
                     }),
                 ));
             }
@@ -289,16 +288,13 @@ fn flush_batch(
         bar.inc(1);
     }
 
-    // Checkpoint — each flush is a complete theorem
-    let ck_thm = theorem.name.clone();
-    let ck_dir = checkpoint_dir.to_path_buf();
-    let ck_model = model_name.to_string();
-    let ck_run = run_id.to_string();
-    tokio::task::spawn_blocking(move || {
-        if let Ok(mut ck) = CheckpointManager::new(&ck_dir, &ck_model, &ck_run) {
-            let _ = ck.mark_done(&ck_thm);
+    // Checkpoint — each flush is a complete theorem.  File is tiny
+    // (~10 KB for 488 names) so synchronous write is fine here.
+    if let Ok(mut ck) = CheckpointManager::new(checkpoint_dir, model_name, run_id) {
+        if let Err(e) = ck.mark_done(&theorem.name) {
+            eprintln!("⚠️  Checkpoint write failed for {}: {e}", theorem.name);
         }
-    });
+    }
 }
 
 /// Write a flat JSON file: `{ "<model>": { "<theorem>": { "attempt_N": "<text>" } } }`.
@@ -419,4 +415,116 @@ fn extract_model_data(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ModelConfig;
+    use std::collections::BTreeMap;
+
+    fn test_model_cfg() -> ModelConfig {
+        ModelConfig {
+            name: "test-model".into(),
+            hf_repo: String::new(),
+            architecture: String::new(),
+            prompt_format: String::new(),
+            param_count_b: None,
+            quantization: None,
+            max_model_len: 4096,
+            temperature: 0.6,
+            top_p: 0.95,
+            max_tokens: 4096,
+            seed: 42,
+            stop_sequences: vec![],
+            system_prompt: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_write_and_load_round_trip() {
+        let tmp = std::env::temp_dir().join("minif2f-test-pipeline-roundtrip");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let raw_path = tmp.join("raw.json");
+        let lean_path = tmp.join("lean.json");
+        let model = test_model_cfg();
+
+        // Build test data
+        let mut results: ResultsMap = BTreeMap::new();
+        let mut attempts: AttemptMap = BTreeMap::new();
+        attempts.insert("attempt_1".into(), ("raw1".into(), "lean1".into()));
+        attempts.insert("attempt_2".into(), ("raw2".into(), "lean2".into()));
+        results.insert("theorem_a".into(), attempts);
+
+        // Write
+        write_flat_json(&raw_path, &model, &results, |(raw, _)| raw).unwrap();
+        write_flat_json(&lean_path, &model, &results, |(_, lean)| lean).unwrap();
+
+        // Load back
+        let loaded = load_existing_results(&raw_path, &lean_path, &model.name).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let att = loaded.get("theorem_a").unwrap();
+        assert_eq!(att.get("attempt_1").unwrap().0, "raw1");
+        assert_eq!(att.get("attempt_1").unwrap().1, "lean1");
+        assert_eq!(att.get("attempt_2").unwrap().0, "raw2");
+        assert_eq!(att.get("attempt_2").unwrap().1, "lean2");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_empty() {
+        let tmp = std::env::temp_dir().join("minif2f-test-pipeline-missing");
+        let raw_path = tmp.join("nonexistent.json");
+        let lean_path = tmp.join("also_nonexistent.json");
+        let model = test_model_cfg();
+
+        let result = load_existing_results(&raw_path, &lean_path, &model.name).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_write_empty_results() {
+        let tmp = std::env::temp_dir().join("minif2f-test-pipeline-empty");
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("empty.json");
+        let model = test_model_cfg();
+        let results: ResultsMap = BTreeMap::new();
+
+        write_flat_json(&path, &model, &results, |(raw, _)| raw).unwrap();
+
+        let loaded = load_existing_results(&path, &path, &model.name).unwrap();
+        assert!(loaded.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_extract_model_data() {
+        let json = serde_json::json!({
+            "test-model": {
+                "theorem_x": {
+                    "attempt_1": "proof text"
+                }
+            }
+        });
+        let map = extract_model_data(Some(&json), "test-model");
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get("theorem_x").unwrap().get("attempt_1").unwrap(),
+            "proof text"
+        );
+    }
+
+    #[test]
+    fn test_extract_model_data_wrong_model_name() {
+        let json = serde_json::json!({
+            "other-model": {
+                "theorem_x": { "attempt_1": "text" }
+            }
+        });
+        let map = extract_model_data(Some(&json), "test-model");
+        assert!(map.is_empty());
+    }
 }

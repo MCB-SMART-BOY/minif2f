@@ -1,6 +1,5 @@
 use crate::config::ModelConfig;
 use anyhow::{Context, Result};
-use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
 use std::process::{Child, Command};
@@ -47,7 +46,9 @@ impl InferenceEngine {
                 "--directory",
                 uv_project_dir,
                 "python",
-                "server.py",
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
                 &model_path,
                 "--port",
                 &port.to_string(),
@@ -59,11 +60,17 @@ impl InferenceEngine {
                 "0.92",
                 "--dtype",
                 "half",
-                "--enforce-eager",
                 "--trust-remote-code",
+                "--quantization",
+                "fp8",
+                "--tokenizer-mode",
+                "slow",
+                "--disable-custom-all-reduce",
+                "--disable-log-stats",
             ])
             .env("CUDA_HOME", &cu13)
             .env("VLLM_USE_FLASHINFER_SAMPLER", "0")
+            .env("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
             .env("OMP_NUM_THREADS", "")
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(format!(
@@ -164,64 +171,6 @@ impl InferenceEngine {
         String::new()
     }
 
-    /// Generate n completions — returns a stream of (attempt_index, text) as
-    /// each request completes. No barrier: results are yielded immediately,
-    /// keeping vLLM's continuous batching saturated.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn generate_stream(
-        &self,
-        prompt: &str,
-        n: usize,
-        attempt_offset: usize,
-    ) -> FuturesUnordered<impl futures::Future<Output = (usize, String)>> {
-        let url = format!("{}/v1/completions", self.base_url);
-        let prompt = prompt.to_string();
-        let client = self.client.clone();
-        let max_tokens = self.config.max_tokens;
-        let temperature = self.config.temperature;
-        let top_p = self.config.top_p;
-        let base_seed = self.config.seed;
-        let stop_sequences = self.config.stop_sequences.clone();
-
-        let futures: FuturesUnordered<_> = FuturesUnordered::new();
-        for i in 0..n {
-            let body = serde_json::json!({
-                "model": self.config.name,
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "seed": base_seed.wrapping_add(attempt_offset as u64 + i as u64) as u32,
-                "stop": stop_sequences,
-                "stream": false,
-            });
-            let client = client.clone();
-            let url = url.clone();
-            futures.push(async move {
-                let text = Self::generate_one_with_retry(&client, &url, body, 3).await;
-                (i, text)
-            });
-        }
-        futures
-    }
-
-    /// Generate n completions with per-request retries (graceful degradation).
-    /// Legacy batch API — returns all results at once (barrier).
-    /// Prefer `generate_stream` for better GPU utilization.
-    pub async fn generate_batch_retry(
-        &self,
-        prompt: &str,
-        n: usize,
-        attempt_offset: usize,
-    ) -> Vec<String> {
-        let mut stream = self.generate_stream(prompt, n, attempt_offset);
-        let mut results: Vec<Option<String>> = vec![None; n];
-        while let Some((i, text)) = stream.next().await {
-            results[i] = Some(text);
-        }
-        results.into_iter().map(|r| r.unwrap_or_default()).collect()
-    }
-
     /// Access the HTTP client (for streaming requests from pipeline).
     #[must_use]
     pub fn http_client(&self) -> &Client {
@@ -285,4 +234,49 @@ fn decode_llama_byte_fallback(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_pure_ascii_passes_through() {
+        let input = "  rfl";
+        assert_eq!(decode_llama_byte_fallback(input), "  rfl");
+    }
+
+    #[test]
+    fn test_decode_latin1_fallback_replacement() {
+        // 0xE2 alone is not valid UTF-8 → from_utf8_lossy produces U+FFFD
+        let input = "\u{00E2}"; // Latin-1 â
+        let decoded = decode_llama_byte_fallback(input);
+        assert!(
+            decoded.contains('\u{FFFD}'),
+            "orphan byte → replacement char"
+        );
+    }
+
+    #[test]
+    fn test_decode_byte_fallback_range() {
+        // U+0120 (Ġ) → 0x20 (space)
+        let decoded = decode_llama_byte_fallback("\u{0120}");
+        assert_eq!(decoded, " ");
+    }
+
+    #[test]
+    fn test_decode_mixed_unicode() {
+        // Valid ASCII + byte-fallback space + valid UTF-8
+        let input = "rw [h\u{0120}]"; // Ġ → space (0x20)
+        let decoded = decode_llama_byte_fallback(input);
+        assert_eq!(decoded, "rw [h ]");
+    }
+
+    #[test]
+    fn test_decode_valid_utf8_preserved() {
+        // Characters like ℕ (U+2115) are valid Unicode and should pass through
+        let input = "theorem foo : \u{2115}";
+        let decoded = decode_llama_byte_fallback(input);
+        assert!(decoded.contains('\u{2115}'));
+    }
 }

@@ -48,7 +48,8 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             ..defaults()
         },
         // 2. Kimina-Prover-RL-1.7B — Qwen3 ChatML
-        //    HF quickstart: max_model_len=131072, max_tokens=8096, temp=0.6, top_p=0.95
+        //    HF config.json: max_position_embeddings=40960
+        //    HF quickstart: max_tokens=8096, temp=0.6, top_p=0.95
         //    Output: <think>...</think> + ```lean4 block
         //    EOS=151645 (<|im_end|>)
         ModelConfig {
@@ -56,7 +57,7 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             hf_repo: "AI-MO/Kimina-Prover-RL-1.7B".into(),
             architecture: "qwen3".into(),
             prompt_format: "kimina".into(),
-            max_model_len: 131072,
+            max_model_len: 40960,
             max_tokens: 8096,
             ..defaults()
         },
@@ -79,8 +80,10 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             ..defaults()
         },
         // 4. DeepSeek-Prover-V2-7B — DeepSeek V2 (LLaMA-based)
-        //    Official: max_model_len=32768 (32K), max_new_tokens=8192, seed=30
-        //    Prompt: "Complete the following Lean 4 code:" + proof plan request
+        //    HF config.json: max_position_embeddings=65536
+        //    Model card: "extended context length of up to 32K tokens"
+        //    HF quickstart: max_new_tokens=8192, seed=30
+        //    Prompt: "Complete the following Lean 4 code:" (non-CoT — no proof plan request)
         //    Chat: NO system prompt — only [{"role": "user", "content": prompt}]
         //    Unicode fullwidth tokens: <｜User｜>, <｜Assistant｜>
         //    EOS=100001, BOS=100000
@@ -88,10 +91,10 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             name: "deepseek-prover-v2-7b".into(),
             hf_repo: "deepseek-ai/DeepSeek-Prover-V2-7B".into(),
             architecture: "deepseek_v2".into(),
-            prompt_format: "goedel_v2".into(),
+            prompt_format: "goedel_v2_nocot".into(),
             param_count_b: Some(7.0),
             quantization: Some("awq".into()),
-            max_model_len: 32768,
+            max_model_len: 65536,
             max_tokens: 8192,
             seed: 30,
             stop_sequences: vec![
@@ -104,7 +107,8 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             ..defaults()
         },
         // 5. Kimina-Prover-Distill-8B — Qwen3 ChatML
-        //    HF tokenizer_config: model_max_length=131072; quickstart: max_tokens=8096, temp=0.6, top_p=0.95
+        //    HF config.json: max_position_embeddings=40960
+        //    HF quickstart: max_tokens=8096, temp=0.6, top_p=0.95
         //    System prompt: "You are an expert in mathematics and Lean 4."
         //    EOS=151645 (<|im_end|>)
         ModelConfig {
@@ -114,17 +118,17 @@ pub fn builtin_models() -> Vec<ModelConfig> {
             prompt_format: "kimina".into(),
             param_count_b: Some(8.0),
             quantization: Some("awq".into()),
-            max_model_len: 131072,
+            max_model_len: 40960,
             max_tokens: 8096,
             system_prompt: "You are an expert in mathematics and Lean 4.".into(),
             ..defaults()
         },
         // 6. STP_model_Lean — based on DeepSeek-Prover-V1.5 (LLaMA-based)
-        //    config.json: max_position_embeddings=4096, but official:
-        //    max_model_len=1024 (STP eval script), max_tokens=1024
-        //    run_generation_and_test.sh: temperature=1.0, seed=1
-        //    model_utils.py: top_p=1.0
+        //    HF config.json: max_position_embeddings=4096
+        //    Official eval: max_model_len=1024 (run_generation_and_test.sh)
         //    Paper §3.1: "Complete the following Lean 4 code:" + ```lean4
+        //    run_generation_and_test.sh: temperature=1.0, seed=1
+        //    model_utils.py: top_p=1.0, max_tokens=1024
         //    STP fine-tuning overrides the base chat template → raw text only.
         //    Format: statement = formal_statement.rsplit("sorry", 1)[0].strip()
         //    — model generates proof body from `:= by`
@@ -174,7 +178,7 @@ mod tests {
         let m = m.unwrap();
         assert_eq!(m.architecture, "qwen3");
         assert_eq!(m.prompt_format, "kimina");
-        assert_eq!(m.max_model_len, 131072);
+        assert_eq!(m.max_model_len, 40960);
         assert_eq!(m.max_tokens, 8096);
     }
 
@@ -186,7 +190,7 @@ mod tests {
         );
         assert_eq!(
             find_model("deepseek-prover-v2-7b").unwrap().max_model_len,
-            32768
+            65536
         );
         assert_eq!(find_model("stp-model-lean").unwrap().max_model_len, 1024);
     }

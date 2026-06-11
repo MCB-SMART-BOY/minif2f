@@ -94,7 +94,10 @@ pub fn load_all(data_dir: &Path) -> Result<Vec<Theorem>> {
     for split in &["test", "valid"] {
         match load_split(data_dir, split) {
             Ok(t) => all.extend(t),
-            Err(e) => errors.push(e),
+            Err(e) => {
+                eprintln!("Warning: failed to load '{split}' split: {e}");
+                errors.push(e);
+            }
         }
     }
     if all.is_empty() && !errors.is_empty() {

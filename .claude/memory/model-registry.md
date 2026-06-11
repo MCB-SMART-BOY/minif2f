@@ -1,30 +1,56 @@
 ---
 name: model-registry
-description: 6 target models — HF repos, architecture, chat templates, GGUF status, prompt formats
+description: 6 models — HF repos, architecture, chat templates, official config.json specs, prompt formats
 metadata:
   type: reference
 ---
 
-Defined in `src/models.rs`. Models inherit from `defaults()`: `temperature=0.6, top_p=0.95, seed=42`; official eval scripts override these per model where explicit.
+Defined in `src/models.rs`. Each model inherits from `defaults()` then overrides per-model parameters from official sources (HF config.json, generation_config.json, eval scripts, papers).
 
-| CLI Name | HF Repo | Arch | Chat | Prompt | ctx | max_tok | temp | top_p | seed |
-|----------|---------|------|------|--------|-----|---------|------|-------|------|
-| `kimina-prover-rl-1.7b` | AI-MO/Kimina-Prover-RL-1.7B | qwen3 | ChatML | kimina | 131072 | 8096 | 0.6 | 0.95 | 42 |
-| `goedel-prover-dpo` | Goedel-LM/Goedel-Prover-DPO | raw | none | simple | 4096 | 2048 | 1.0 | 0.95 | 1 |
-| `goedel-prover-v2-8b` | Goedel-LM/Goedel-Prover-V2-8B | qwen3 | ChatML | goedel_v2 | 40960 | 32768 | 0.6 | 0.95 | 30 |
-| `deepseek-prover-v2-7b` | deepseek-ai/DeepSeek-Prover-V2-7B | deepseek_v2 | Unicode ｜ | goedel_v2 | 32768 | 8192 | 0.6 | 0.95 | 30 |
-| `kimina-prover-distill-8b` | AI-MO/Kimina-Prover-Distill-8B | qwen3 | ChatML | kimina | 131072 | 8096 | 0.6 | 0.95 | 42 |
-| `stp-model-lean` | kfdong/STP_model_Lean | **raw** | **none** | **deepseek_prover** | 1024 | 1024 | 1.0 | 1.0 | 1 |
+## Complete Model Table
 
-Values are sourced from explicit Hugging Face model cards, Hugging Face `config.json` / `tokenizer_config.json`, and official eval scripts. When sources differ, `ctx` follows an explicit model-card `max_model_len` first; otherwise it follows model `config.json` (`max_position_embeddings`).
+| CLI Name | HF Repo | Arch | Base | ctx | max_tok | temp | top_p | seed | Prompt | SysPrompt |
+|----------|---------|------|------|-----|---------|------|-------|------|--------|-----------|
+| `goedel-prover-dpo` | Goedel-LM/Goedel-Prover-DPO | raw | LLaMA-7B | 4096 | 2048 | 1.0 | 0.95 | 1 | simple | _(none)_ |
+| `kimina-prover-rl-1.7b` | AI-MO/Kimina-Prover-RL-1.7B | qwen3 | Qwen3-1.7B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `goedel-prover-v2-8b` | Goedel-LM/Goedel-Prover-V2-8B | qwen3 | Qwen3-8B | 40960 | 32768 | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
+| `deepseek-prover-v2-7b` | deepseek-ai/DeepSeek-Prover-V2-7B | deepseek_v2 | LLaMA-7B | 65536 | 8192 | 0.6 | 0.95 | 30 | goedel_v2_nocot | _(none)_ |
+| `kimina-prover-distill-8b` | AI-MO/Kimina-Prover-Distill-8B | qwen3 | Qwen3-8B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `stp-model-lean` | kfdong/STP_model_Lean | raw | DS-Prover-V1.5 | 1024 | 1024 | 1.0 | 1.0 | 1 | deepseek_prover | _(none)_ |
 
-## Key design decisions
+## Architecture Details
 
-- **Qwen3 template**: ChatML template WITHOUT a prepopulated empty `<think>` block. Kimina models generate `<think>...</think>` naturally because the official Kimina RL format requires one thinking block followed by one Lean 4 block. Goedel-V2 uses the official proof-plan prompt instead.
-- **Goedel-V2 / DeepSeek-V2 format**: Includes a `sorry` placeholder in the theorem statement, matching the official HF prompt format. Goedel-DPO `simple` does not add `sorry`.
-- **DeepSeek Prover / STP format**: NO `sorry` placeholder — model generates directly from `:= by`. Raw architecture (no chat template), open ```lean4 block. Matches STP paper/eval scripts.
-- **DeepSeek V2**: Uses Unicode fullwidth `｜` (U+FF5C) tokens — exact format from official docs.
-- **STP model**: `max_model_len=1024`, `temperature=1.0`, `top_p=1.0`, seed=1 match official STP miniF2F generation scripts. Informal prefix is excluded to save context space.
-- **Goedel-DPO**: Raw completion prompt with an open ```lean4 block, matching the official Goedel-Prover eval script. Sampling: `temperature=1.0`, `top_p=0.95`, `max_tokens=2048`, seed=1.
+| Model | model_type | GQA | kv_heads | attn_heads | vocab | EOS token | EOS ID |
+|-------|-----------|-----|----------|------------|-------|-----------|--------|
+| goedel-prover-dpo | llama | No | 32 | 32 | 102400 | `<｜end▁of▁sentence｜>` | 100001 |
+| kimina-prover-rl-1.7b | qwen3 | Yes | 8 | 16 | 151936 | `<\|im_end\|>` | 151645 |
+| goedel-prover-v2-8b | qwen3 | Yes | 8 | 32 | 151936 | `<\|im_end\|>` | 151645 |
+| deepseek-prover-v2-7b | llama | No | 32 | 32 | 102400 | `<｜end▁of▁sentence｜>` | 100001 |
+| kimina-prover-distill-8b | qwen3 | Yes | 8 | 32 | 151936 | `<\|im_end\|>` | 151645 |
+| stp-model-lean | llama | No | 32 | 32 | 100004 | `<｜end▁of▁sentence｜>` | 100001 |
 
-**How to apply:** Find by name with `find_model()`. Add new models by extending `builtin_models()`.
+## Prompt Formats
+
+| Format | Architecture | Chat Template | Used by |
+|--------|-------------|---------------|---------|
+| `simple` | raw | None (bare prompt) | goedel-prover-dpo |
+| `kimina` | qwen3 | `<\|im_start\|>` ChatML | kimina-rl-1.7b, kimina-distill-8b |
+| `goedel_v2` | qwen3 | `<\|im_start\|>` ChatML (user only) | goedel-v2-8b |
+| `goedel_v2_nocot` | deepseek_v2 | Unicode `｜` (U+FF5C) | deepseek-prover-v2-7b |
+| `deepseek_prover` | raw | None (bare prompt) | stp-model-lean |
+
+## Official Sources
+
+See [[official-model-requirements]] for the complete reference with exact prompt templates, inference parameters, EOS tokens, and paper citations for every model.
+
+## vLLM Inference
+
+All models served via vLLM with FP8 quantization on RTX 5090 32GB. vLLM's `--max-model-len` is set to `(max_tokens + 4096).min(max_model_len)`. The `stop` parameter in API calls provides additional stop strings beyond vLLM's built-in EOS token handling.
+
+## Context Size Formula
+
+```
+per_seq = (max_tokens + 4096).min(max_model_len)
+vLLM --max-model-len = per_seq
+--max-num-seqs = parallel (continuous batching)
+```

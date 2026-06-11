@@ -1,20 +1,29 @@
 # convert-model
 
-Download HF model → convert to GGUF for llama-server.
+**Note**: With vLLM backend, models are loaded directly from HF safetensors — no GGUF conversion needed. This skill is kept for historical reference.
 
-```
-./scripts/setup.sh → option 2 (Download from HuggingFace)
+## Current: vLLM direct loading
+
+vLLM loads BF16 safetensors directly from `data/models/<name>/` and applies FP8 quantization at load time:
+
+```bash
+# vLLM is spawned automatically by the Rust pipeline:
+# InferenceEngine::start() runs: uv run --directory tools/vllm python server.py <model_path> --port <port> --quantization fp8 ...
 ```
 
-## Manual
+Models are downloaded once via `huggingface-cli download <repo> --local-dir data/models/<name>`.
+
+## Legacy: llama.cpp GGUF conversion
 
 ```bash
 source tools/venv/bin/activate
 export HF_TOKEN="hf_..."
 
-# Convert: f16 for 1.7B (~3.2 GB), q4_k_m for 7-8B (~4-5 GB)
+# 1.7B: f16 (~3.2 GB)
 python tools/llama.cpp/convert_hf_to_gguf.py data/models/<name> \
-  --outfile models/<name>.gguf --outtype f16       # 1.7B
+  --outfile models/<name>.gguf --outtype f16
+
+# 7-8B: q4_k_m (~4-5 GB)
 python tools/llama.cpp/convert_hf_to_gguf.py data/models/<name> \
-  --outfile models/<name>.gguf --outtype q4_k_m    # 7-8B
+  --outfile models/<name>.gguf --outtype q4_k_m
 ```

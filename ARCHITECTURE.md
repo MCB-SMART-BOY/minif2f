@@ -2,9 +2,9 @@
 
 ## Overview
 
-**Goal**: Generate 128 proof attempts per theorem for miniF2F (488 theorems) using 6 Lean 4 theorem-proving LLMs on llama.cpp with a single RTX 5090 32GB GPU.
+**Goal**: Generate 128 proof attempts per theorem for miniF2F (488 theorems) using 6 Lean 4 theorem-proving LLMs using vLLM with FP8 quantization on a single RTX 5090 32GB GPU.
 
-**Stack**: Pure Rust (tokio async) + llama-server (C binary, child process). Zero Python at runtime.
+**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
 
 **Output**: Two flat JSON files per model:
 - `output/raw_output/<model>.json` — unfiltered model completions
@@ -21,8 +21,8 @@
 | `config.rs` | 72 | `ModelConfig` + `PipelineConfig` structs |
 | `models.rs` | 222 | 6-model registry with per-model specs |
 | `data.rs` | 158 | `Theorem` struct, JSONL loader, `make_proof_file()` |
-| `prompts.rs` | 910 | Chat templates + 4 prompt formats + proof extraction + validation |
-| `inference.rs` | 247 | `InferenceEngine`: llama-server lifecycle, HTTP `/completion` |
+| `prompts.rs` | 910 | Chat templates + 5 prompt formats + proof extraction + validation |
+| `inference.rs` | 289 | `InferenceEngine`: vLLM server lifecycle, HTTP `/v1/completions` |
 | `checkpoint.rs` | 140 | Atomic JSON-set crash recovery |
 | `pipeline.rs` | 428 | Continuous request pool → two-layer JSON output |
 
@@ -41,12 +41,12 @@ Per-model inference parameters, aligned to official HuggingFace specs.
 | `prompt_format` | String | User message format: `"kimina"` \| `"goedel_v2"` \| `"simple"` \| `"deepseek_prover"` |
 | `param_count_b` | Option\<f64\> | Billion parameters (for display) |
 | `quantization` | Option\<String\> | e.g. `"awq"`, `"q4_k_m"` |
-| `max_model_len` | u32 | Max context length for llama-server `--ctx-size` |
+| `max_model_len` | u32 | Max context length for vLLM `--max-model-len` |
 | `max_tokens` | u32 | `n_predict` (max output tokens per completion) |
 | `temperature` | f64 | Sampling temperature (default 0.6) |
 | `top_p` | f64 | Nucleus sampling (default 0.95) |
 | `seed` | u64 | Base seed (per-attempt seed = base + attempt_index) |
-| `stop_sequences` | Vec\<String\> | Stop tokens sent to llama-server `stop` parameter |
+| `stop_sequences` | Vec\<String\> | Stop tokens sent to vLLM `/v1/completions` `stop` parameter |
 | `system_prompt` | String | System message prepended to chat template (empty for raw/no-system models) |
 
 ### `PipelineConfig` (Default)
@@ -55,16 +55,16 @@ Runtime configuration for a single pipeline run.
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `project_root` | PathBuf | `"."` | Root directory for data/output/checkpoint resolution |
-| `llama_server_binary` | String | `"llama-server"` | Path to llama-server executable |
-| `port` | u16 | `8080` | HTTP port for llama-server |
+| `uv_project_dir` | String | `"tools/vllm"` | Path to vLLM Python project |
+| `port` | u16 | `8080` | HTTP port for vLLM server |
 | `completion_attempts` | usize | `128` | Number of attempts per theorem |
-| `parallel` | u32 | `8` | llama-server `--parallel` (concurrent GPU slots) |
+| `parallel` | u32 | `8` | vLLM `--max-num-seqs` (continuous batching) |
 
 ### Helper methods on `PipelineConfig`:
 - **`data_path()`** → `project_root/data` — where JSONL theorem files live
 - **`output_dir()`** → `project_root/output` — where raw_output/ and lean_code/ go
 - **`checkpoint_dir()`** → `project_root/results/checkpoints` — crash recovery state
-- **`llama_server_path()`** → resolves `tools/llama.cpp/build/bin/llama-server` if present, else falls back to `$PATH`
+- **`uv_project_dir()`** → path to `tools/vllm/` for vLLM Python server
 
 ---
 
@@ -81,10 +81,10 @@ Returns all 6 models with official specs. Each entry is a `ModelConfig` struct l
 | CLI Name | Arch | Base Model | ctx | max_tok | temp | top_p | seed | Prompt Format | Sys Prompt |
 |----------|------|-----------|-----|---------|------|-------|------|---------------|------------|
 | `goedel-prover-dpo` | raw | LLaMA-7B | 4096 | 2048 | 1.0 | 0.95 | 1 | simple | _(empty)_ |
-| `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | 131072 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
 | `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | 40960 | 32768 | 0.6 | 0.95 | 30 | goedel_v2 | _(empty)_ |
-| `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | 32768 | 8192 | 0.6 | 0.95 | 30 | goedel_v2 | _(empty)_ |
-| `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | 131072 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | 65536 | 8192 | 0.6 | 0.95 | 30 | goedel_v2_nocot | _(empty)_ |
+| `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
 | `stp-model-lean` | raw | DS-Prover-V1.5 | 1024 | 1024 | 1.0 | 1.0 | 1 | deepseek_prover | _(empty)_ |
 
 ### `find_model(name: &str)` → `Option<ModelConfig>`
@@ -148,7 +148,7 @@ Constructor — stores the model config.
 ### Prompt Building Chain
 
 #### `PromptBuilder::build(&self, theorem: &Theorem)` → `String`
-**Top-level entry point.** Constructs the full prompt sent to llama-server:
+**Top-level entry point.** Constructs the full prompt sent to vLLM:
 
 1. Calls `build_user_message(theorem)` → gets the user content
 2. Wraps it in the model's chat template based on `config.architecture`
@@ -164,7 +164,7 @@ Constructor — stores the model config.
 
 **Special cases in templates:**
 - **Qwen3**: Do not prepopulate an empty `<think>` block. Kimina models generate their own reasoning block; Goedel-V2 uses the official proof-plan prompt instead. When `system_prompt.is_empty()` (Goedel-V2), the system message block is entirely omitted — matching official `apply_chat_template` behavior.
-- **DeepSeek V2**: BOS (`<｜begin▁of▁sentence｜>`) is NOT included in the template — llama-server adds it automatically via `add_bos_token` in the tokenizer config. Including it would produce a double BOS warning.
+- **DeepSeek V2**: BOS (`<｜begin▁of▁sentence｜>`) is NOT included in the template — vLLM adds it automatically via `add_bos_token` in the tokenizer config. Including it would produce a double BOS warning.
 - **Goedel-DPO raw format**: Uses the official Goedel-Prover eval prompt directly, with an open ```lean4 block and no chat wrapper.
 
 #### `PromptBuilder::build_user_message(&self, theorem: &Theorem)` → `String`
@@ -173,7 +173,8 @@ Routes to the format-specific builder based on `config.prompt_format`:
 | Format | Function | Used by |
 |--------|----------|---------|
 | `kimina` | `build_kimina()` | Kimina-RL, Kimina-Distill |
-| `goedel_v2` | `build_goedel_v2()` | Goedel-V2, DeepSeek-Prover-V2 |
+| `goedel_v2` | `build_goedel_v2(theorem, true)` | Goedel-V2 (CoT) |
+| `goedel_v2_nocot` | `build_goedel_v2(theorem, false)` | DeepSeek-Prover-V2 (non-CoT) |
 | `simple` | `build_simple()` | Goedel-Prover-DPO |
 | `deepseek_prover` | `build_deepseek_prover()` | STP |
 
@@ -192,7 +193,8 @@ Think about and solve the following problem step by step in Lean 4.
 - Model expected to output `<think>...</think>` followed by a ```lean4 block
 - Do NOT prepopulate an empty `<think>` block — the model generates it naturally
 
-#### `build_goedel_v2(theorem)` → `String`
+#### `build_goedel_v2(theorem, cot)` → `String`
+When `cot=true` (Goedel-Prover-V2):
 ~~~text
 Complete the following Lean 4 code:
 
@@ -200,12 +202,24 @@ Complete the following Lean 4 code:
 {header}
 {informal_prefix}
 {formal_statement}
-  sorry```
-  
+  sorry
+```
 Before producing the Lean 4 code to formally prove the given theorem, provide a detailed proof plan...
 ~~~
+When `cot=false` (non-CoT, used by DeepSeek-Prover-V2):
+~~~text
+Complete the following Lean 4 code:
+
+```lean4
+{header}
+{informal_prefix}
+{formal_statement}
+  sorry
+```
+~~~
 - Includes `sorry` placeholder — model must replace it
-- Closing ``` on the SAME line as `sorry` (official format)
+- Official format: closing ``` on its own line after `sorry`
+- CoT mode asks for proof plan; non-CoT outputs code directly
 
 #### `build_simple(theorem)` → `String`
 ~~~text
@@ -328,33 +342,32 @@ Extracts natural language description from `/-- ... -/` comment blocks. Strips t
 struct InferenceEngine {
     config: ModelConfig,   // model config (for params)
     client: Client,        // reqwest HTTP client (5-min timeout)
-    server: Child,         // llama-server child process handle
+    server: Child,         // vLLM child process handle
     base_url: String,      // "http://localhost:{port}"
 }
 ```
 
-### `InferenceEngine::start(config, model_path, port, llama_server_binary, parallel)` → `Result<Self>`
-**Spawns llama-server as a child process** and waits for it to be ready.
+### `InferenceEngine::start(config, model_path, port, uv_project_dir, parallel)` → `Result<Self>`
+**Spawns vLLM via `uv run` as a child process** and waits for it to be ready.
 
-**llama-server flags:**
+**vLLM flags (via `uv run server.py`):**
 | Flag | Value | Purpose |
 |------|-------|---------|
-| `-m` | model_path | GGUF model file |
+| model_path | positional | Model directory (HF safetensors) |
 | `--port` | port | HTTP port |
 | `-ngl` | 99 | GPU layers (all) |
-| `--ctx-size` | `(max_tokens + 4096).min(max_model_len) * parallel` | Total context window; llama-server splits it across parallel slots |
-| `--batch-size` | 2048 | Prompt processing batch size |
+| `--max-model-len` | `(max_tokens + 4096).min(max_model_len)` | Per-sequence context window |
+| `--max-num-seqs` | parallel | Max concurrent sequences (continuous batching) |
 | `--parallel` | parallel | Concurrent GPU slots |
-| `--cache-type-k` | q8_0 | KV cache quantization (key) |
-| `--cache-type-v` | q8_0 | KV cache quantization (value) |
+| `--gpu-memory-utilization` | 0.92 | GPU memory fraction for vLLM |
 | `--cache-reuse` | 256 | Cache reuse window |
-| `--flash-attn` | on | Flash attention |
-| `--no-warmup` | — | Skip warmup (faster startup) |
+| `--dtype` | half | Weight precision (FP16) |
+| `--quantization` | fp8 | Weight quantization (FP8 runtime) |
 | `--api-key` | minif2f | API key for auth |
 
 **Health check loop**: Polls `GET /health` every 500ms–1s. Status 200 = ready, 503 = model still loading. Timeout after 2 minutes → kill server, bail.
 
-Stderr is redirected to `/tmp/llama-server-{port}.log`.
+Stderr is redirected to `/tmp/vllm-server-{port}.log`.
 
 ### `InferenceEngine::generate_one_with_retry(client, url, body, max_retries)` → `String`
 **Static method** — sends a single `/completion` POST request with exponential backoff retry.
@@ -378,7 +391,7 @@ Accessor for the HTTP client — used by `pipeline.rs` to create streaming reque
 Accessor for the base URL — used by `pipeline.rs` to build `/completion` URLs.
 
 ### `InferenceEngine::stop(self)`
-Kills the llama-server process (SIGKILL). Frees GPU memory.
+Kills the vLLM process (SIGTERM → SIGKILL). Frees GPU memory.
 
 ### `Drop` implementation
 Kills the server if `stop()` wasn't called explicitly. Zombie reaping.
@@ -436,7 +449,7 @@ Constructor.
 
 #### Phase 0: Load & Setup
 1. **Load theorems**: `load_all()` → 488 theorems
-2. **Start inference engine**: `InferenceEngine::start()` → spawns llama-server, waits `/health`
+2. **Start inference engine**: `InferenceEngine::start()` → spawns vLLM, waits `/health`
 3. **Create output dirs**: `output/raw_output/`, `output/lean_code/`
 4. **Init checkpoint**: `CheckpointManager::new()` → resume from prior run
 5. **Load existing results**: `load_existing_results()` → merge raw_output + lean_code JSONs from disk
@@ -484,7 +497,7 @@ When a theorem's batch is complete:
 
 #### Phase 5: Final Write + Shutdown
 - Write final JSON files (catches any theorems after the last incremental write)
-- `engine.stop()` → kill llama-server, free GPU
+- `engine.stop()` → kill vLLM, free GPU
 - Print summary: theorem count, file sizes
 
 ---
@@ -534,7 +547,7 @@ Uses `clap` derive macros for argument parsing.
 | Command | Args | Description |
 |---------|------|-------------|
 | `list-models` | — | Prints all 6 model names |
-| `generate` | `-m <model> -p <gguf> [-n 128] [--parallel 8] [--port 8080] [--run-id default]` | Runs the full pipeline for one model |
+| `generate` | `-m <model> -p data/models/<name> [-n 128] [--parallel 8] [--port 8080] [--run-id default]` | Runs the full pipeline for one model |
 | `report` | `-m <model> [--run-id default]` | Placeholder — directs to output JSONs |
 | `status` | `[--run-id default]` | Prints checkpoint progress for all models |
 
@@ -641,7 +654,8 @@ When a theorem's configured attempts are complete, `rayon::par_iter()` splits ex
 | Format | Models | Input Type | `sorry` | Content |
 |--------|--------|-----------|---------|---------|
 | `kimina` | Kimina-RL-1.7B, Kimina-Distill-8B | Chat (system+user) | No | "Think about and solve..." with `# Problem:` and `# Formal statement:` |
-| `goedel_v2` | Goedel-V2-8B, DeepSeek-Prover-V2-7B | Chat (user only) | Yes | "Complete the following Lean 4 code:" + proof plan request |
+| `goedel_v2` | Goedel-V2-8B | Chat (user only) | Yes | "Complete the following Lean 4 code:" + proof plan request (CoT) |
+| `goedel_v2_nocot` | DeepSeek-Prover-V2-7B | Chat (user only) | Yes | "Complete the following Lean 4 code:" — no proof plan (non-CoT) |
 | `simple` | Goedel-Prover-DPO | Completion (raw) | No | "Complete... with explanatory comments..." + open code block |
 | `deepseek_prover` | STP | Completion (raw) | No | "Complete the following Lean 4 code:" + open code block (from `:= by`, no informal_prefix) |
 
@@ -662,8 +676,8 @@ When a theorem's configured attempts are complete, `rayon::par_iter()` splits ex
 ## Hardware Configuration
 
 - **GPU**: RTX 5090 32GB (CUDA)
-- **1.7B FP16**: ~3.2 GB VRAM. **7-8B Q4_K_M**: ~4-5 GB VRAM
-- **KV cache**: q8_0 quantization, shared paged pool — `--parallel` does NOT linearly multiply VRAM
+- **BF16 safetensors → FP8 at load time**: ~7-8 GB VRAM per 7-8B model, ~1.7 GB per 1.7B
+- **KV cache**: vLLM PagedAttention — dynamically managed, not static slot allocation
 - **Per-model parallelism** (current `scripts/generate-all.sh` values):
   - Goedel-Prover-DPO: 16
   - DeepSeek-Prover-V2-7B: 7
@@ -678,21 +692,21 @@ When a theorem's configured attempts are complete, `rayon::par_iter()` splits ex
 
 ```
 per_slot = (max_tokens + 4096).min(max_model_len)
-ctx_size = per_slot * parallel
+# vLLM uses per_seq as --max-model-len directly; no ctx_size multiplication needed for PagedAttention
 ```
 
 - `max_tokens + 4096`: output budget plus prompt/reasoning headroom per slot
 - `.min(max_model_len)`: capped at the model's official context limit
-- `* parallel`: llama-server divides `--ctx-size` across parallel slots
+- vLLM PagedAttention: KV cache is dynamically managed across sequences
 - q8_0 KV cache + shared paged pool makes large ctx-sizes viable (VRAM grows ~65KB/token for 8B, ~49KB/token for 1.7B)
 
 Per-slot context:
 | Model | max_tok | max_model_len | per_slot |
 |-------|---------|---------------|----------|
-| kimina-prover-rl-1.7b | 8096 | 131072 | **12,192** |
+| kimina-prover-rl-1.7b | 8096 | 40960 | **12,192** |
 | goedel-prover-v2-8b | 32768 | 40960 | **36,864** |
-| deepseek-prover-v2-7b | 8192 | 32768 | **12,288** |
-| kimina-prover-distill-8b | 8096 | 131072 | **12,192** |
+| deepseek-prover-v2-7b | 8192 | 65536 | **12,288** |
+| kimina-prover-distill-8b | 8096 | 40960 | **12,192** |
 | goedel-prover-dpo | 2048 | 4096 | **4,096** |
 | stp-model-lean | 1024 | 1024 | **1,024** |
 
@@ -728,7 +742,7 @@ cargo build --release      # optimized build
 ### `./scripts/generate-all.sh` — Parallel generation via tmux
 
 Runs all 6 configured models sequentially. Each model gets:
-- llama-server on port 8080
+- vLLM on port 8080 via `uv run`
 - Per-model `--parallel` value
 - Retry loop (max 5 attempts with exponential backoff)
 - Run ID: `v128-YYYYMMDD-v{N}-{model_name}`
@@ -774,5 +788,5 @@ pipeline.rs
 6. **Incremental JSON writes** — crash resilience independent of checkpoint system
 7. **Chat template prepopulation** — DeepSeek Coder gets `### Response:\n```lean4\n{code}` to keep it in code-generation mode
 8. **Conditional system prompt** — Qwen3 template omits system block when `system_prompt` is empty (Goedel-V2 official behavior)
-9. **No BOS in template** — llama-server adds it via tokenizer config, prevents double BOS
+9. **No BOS in template** — vLLM/tokenizer adds it automatically, prevents double BOS
 10. **Atomic checkpoint writes** — temp file + rename for crash-safe persistence

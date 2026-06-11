@@ -1,10 +1,13 @@
-- [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem, 6 models, two-layer JSON output, validate_lean_code gate
-- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, per-model --parallel values, KV cache q8_0 shared pool
-- [Pipeline Architecture](memory/pipeline-architecture.md) — buffer_unordered GPU → rayon par_iter CPU → validate → two-layer JSON, incremental writes
-- [Model Registry](memory/model-registry.md) — 6 models with official specs, raw Goedel-DPO/STP, STP max_len=1024
-- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 36 tests
+- [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem × 6 models → two-layer JSON, validate_lean_code gate
+- [Official Model Requirements](memory/official-model-requirements.md) — Complete reference: exact prompts, params, EOS tokens, papers for all 6 models
+- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, vLLM FP8, per-model --max-num-seqs
+- [Pipeline Architecture](memory/pipeline-architecture.md) — buffer_unordered GPU → rayon par_iter CPU → validate → two-layer JSON
+- [Model Registry](memory/model-registry.md) — 6 models with official config.json specs, architectures, EOS tokens, prompt formats
+- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 37 tests
 - [Git Commit Style](memory/git-commit-style.md) — No Co-Authored-By lines in commits
-- [Kimina-Prover Think Mode](memory/kimina-prover-think-mode.md) — RL format reward requires `<think>`; empty think breaks model
+- [Kimina-Prover Think Mode](memory/kimina-prover-think-mode.md) — RL format reward: `<think>` block required, empty think breaks model
 - [Checkpoint Resume Fix](memory/checkpoint-resume-fix.md) — Loads existing JSON on resume; no data loss
-- [Goedel-DPO Prompt Fix](memory/goedel-dpo-prompt-fix.md) — Historical chat-prepopulation fix; current DPO uses official raw prompt
+- [Goedel-DPO Prompt Fix](memory/goedel-dpo-prompt-fix.md) — Historical: chat-prepopulation fix; current code uses official raw prompt
+- [Code Audit Report](memory/code-audit-report.md) — Full audit findings: 0 critical, 2 high, 4 medium, 1 low
+- [CLAUDE.md](../CLAUDE.md) — Primary project instructions (commands, architecture, data flow, model specs)
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — Full function-level architecture documentation (all 9 source files, end-to-end data flow)

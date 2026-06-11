@@ -11,65 +11,61 @@ tmux capture-pane -t minif2f-gen -p | tail -5
 # GPU state
 nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu --format=csv,noheader
 
-# Server log (throughput, tokens)
-grep "n_decoded" /tmp/llama-server-8080.log | tail -5
-grep -c "stop processing:" /tmp/llama-server-8080.log  # total completions
+# Check vLLM process
+ps aux | grep "server.py" | grep -v grep
+
+# Current model running
+ps aux | grep "minif2f generate" | grep -v grep | grep -oP '\-m \S+'
+
+# Check if vLLM server is healthy
+curl -s http://localhost:8080/health 2>/dev/null || echo "Server not responding"
 ```
 
 ## Output quality check
 
 ```bash
+# Sample non-empty proofs from latest model
+python3 << 'PYEOF'
+import json, random
+model = "deepseek-prover-v2-7b"  # adjust
+with open(f"output/lean_code/{model}.json") as f:
+    data = json.load(f)
+lean = data[model]
+non_empty = [(t,a,c) for t in lean for a,c in lean[t].items() if c.strip()]
+print(f"Non-empty proofs: {len(non_empty)} / {sum(len(v) for v in lean.values())}")
+if non_empty:
+    sample = random.sample(non_empty, min(3, len(non_empty)))
+    for t,a,c in sample:
+        print(f"\n--- {t}/{a} ---")
+        print(c[:500])
+PYEOF
+
+# Count completed theorems in checkpoint
 python3 -c "
 import json
-for model in ['goedel-prover-dpo','deepseek-prover-v2-7b','kimina-prover-rl-1.7b','goedel-prover-v2-8b','kimina-prover-distill-8b']:
-    for ftype in ['raw_output', 'lean_code']:
-        try:
-            d = json.load(open(f'output/{ftype}/{model}.json'))
-            data = d.get(model, {})
-            total = sum(len(v) for v in data.values())
-            nonempty = sum(1 for v in data.values() for p in v.values() if p.strip())
-            print(f'{model:30s} {ftype:12s}: {nonempty:6d}/{total} non-empty ({100*nonempty/max(1,total):5.1f}%)')
-        except: pass
+with open('results/checkpoints/kimina-prover-rl-1.7b__v128-20260607-vllm-kimina-prover-rl-1.7b.json') as f:
+    ckpt = json.load(f)
+print(f'{len(ckpt)}/488 theorems done')
 "
 ```
 
-## Throughput analysis
+## Throughput estimate
 
 ```bash
-# Average tokens per completion
-grep "n_tokens" /tmp/llama-server-8080.log | grep -oP 'n_tokens = \d+' | awk -F'= ' '{sum+=$2; c++} END {printf "avg n_tokens: %.0f (n=%d)\n", sum/c, c}'
-
-# Generation speed per slot
-grep "n_decoded" /tmp/llama-server-8080.log | tail -10 | grep -oP 'tg =\s*\d+\.\d+' | awk -F'= ' '{sum+=$2; c++} END {printf "avg tg: %.1f t/s (n=%d)\n", sum/c, c}'
-
-# Completions per minute (approximate)
-echo "Completions: $(grep -c 'stop processing:' /tmp/llama-server-8080.log)"
+# Count completed attempts vs total
+python3 << 'PYEOF'
+import json, os, time
+model = "kimina-prover-rl-1.7b"
+path = f"output/raw_output/{model}.json"
+if os.path.exists(path):
+    with open(path) as f:
+        data = json.load(f)
+    thms = len(data[model])
+    attempts = sum(len(v) for v in data[model].values())
+    mtime = os.path.getmtime(path)
+    age_h = (time.time() - mtime) / 3600
+    print(f"Theorems: {thms}/488 ({thms/488*100:.1f}%)")
+    print(f"Attempts: {attempts}")
+    print(f"File age: {age_h:.1f}h")
+PYEOF
 ```
-
-## Checkpoint status
-
-```bash
-# List completed theorems per model
-for f in results/checkpoints/*.json; do
-    echo "$f: $(python3 -c "import json; d=json.load(open('$f')); print(len(d))") theorems done"
-done
-```
-
-## Runtime management
-
-```bash
-tmux attach -t minif2f-gen     # view running generation
-Ctrl-B d                        # detach
-fuser -k 8080/tcp               # kill llama-server
-tmux kill-session -t minif2f-gen # kill pipeline
-cargo run -- generate ... --run-id <id>  # resume (same ID)
-```
-
-## What gets checked
-
-- `results/checkpoints/<model>__<run_id>.json` — completed theorem names (JSON array)
-- Per-theorem checkpoint: triggered when all 128 attempts for a theorem complete
-- Resume: loads existing `output/raw_output/<model>.json` and `output/lean_code/<model>.json`, merges (raw, lean) tuples, skips completed theorems
-- Incremental writes: JSONs written every 20 theorems independently of checkpoint system
-
-See `ARCHITECTURE.md` for full pipeline documentation.
