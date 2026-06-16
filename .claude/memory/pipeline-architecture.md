@@ -70,10 +70,11 @@ InferenceEngine::start() → spawns vLLM via `uv run`
   └─ Returns engine handle
 ```
 
-API: `POST /v1/completions` with JSON body:
+API: `POST /v1/completions` with OpenAI-compatible JSON body:
 ```json
-{"prompt": "...", "n_predict": max_tokens, "temperature": T, "top_p": P, "seed": S, "stop": [...], "n_probs": 0}
+{"prompt": "...", "max_tokens": N, "temperature": T, "top_p": P, "seed": S, "stop": [...]}
 ```
+Response: `choices[0].text` → decoded via `decode_llama_byte_fallback()`.
 
 ### Per-Slot Context (vLLM --max-model-len)
 
@@ -85,5 +86,5 @@ API: `POST /v1/completions` with JSON body:
 | goedel-prover-v2-8b | 32768 | 40960 | 36,864 |
 | deepseek-prover-v2-7b | 8192 | 65536 | 12,288 |
 | kimina-prover-distill-8b | 8096 | 40960 | 12,192 |
-| goedel-prover-dpo | 2048 | 4096 | 6,144 |
-| stp-model-lean | 1024 | 1024 | 5,120 |
+| goedel-prover-dpo | 2048 | 4096 | 4,096 |
+| stp-model-lean | 1024 | 1024 | 1,024 |

@@ -682,6 +682,17 @@ fn strip_theorem_header(code: &str) -> String {
             return after_by.to_string();
         }
     }
+    // DeepSeek-Prover-V2 often outputs `:=by` without a space (single-line format).
+    // This is common when the model generates code without newlines — the tokenizer
+    // merges `:=` and `by` into a continuous string.  Without this fallback the
+    // proof body is rejected because `is_proof_body` sees "theorem" at the start.
+    if let Some(pos) = code.find(":=by") {
+        let after_pos = pos + 4; // skip ":=by" (4 chars)
+        let after_by = code[after_pos..].trim();
+        if !after_by.is_empty() && is_proof_body(after_by) {
+            return after_by.to_string();
+        }
+    }
     code.to_string()
 }
 
@@ -924,6 +935,36 @@ mod tests {
         let stripped = strip_theorem_header(code);
         assert!(stripped.contains("have h₁"));
         assert!(stripped.contains("rw [h₁]"));
+        assert!(!stripped.contains("theorem foo"));
+    }
+
+    #[test]
+    fn test_strip_theorem_header_without_space() {
+        // DeepSeek often outputs `:=by` without space (one-line format)
+        let code = "import Mathlib\ntheorem foo : 1 = 1 :=by rfl";
+        let stripped = strip_theorem_header(code);
+        assert!(stripped.contains("rfl"));
+        assert!(!stripped.contains("theorem foo"));
+        assert!(!stripped.contains(":=by"));
+    }
+
+    #[test]
+    fn test_strip_theorem_header_deepseek_oneline() {
+        // Real deepseek output: everything on one line, `:=by` no space
+        let code = "import Mathlib\ntheorem foo (a b : Nat) : a + b = b + a :=by rw [add_comm]";
+        let stripped = strip_theorem_header(code);
+        assert!(stripped.contains("rw [add_comm]"));
+        assert!(!stripped.contains("theorem foo"));
+    }
+
+    #[test]
+    fn test_strip_theorem_header_deepseek_oneline_have() {
+        // DeepSeek one-line with nested `have ... :=by` — must preserve inner `have`
+        let code = "import Mathlib\ntheorem foo (h : a = b) : a + 1 = b + 1 :=by have h1 : a + 1 = b + 1 :=by rw [h]; exact h1";
+        let stripped = strip_theorem_header(code);
+        assert!(stripped.contains("have h1"));
+        assert!(stripped.contains("rw [h]"));
+        assert!(stripped.contains("exact h1"));
         assert!(!stripped.contains("theorem foo"));
     }
 

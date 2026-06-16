@@ -13,8 +13,8 @@ Generate 128 proof attempts for each of 488 miniF2F theorems using 6 Lean 4 theo
 
 **Scale**: 6 models × 488 theorems × 128 attempts = 374,784 proof generations.
 
-Built as pure Rust CLI. Uses `llama-server` (C binary, managed as child process) for GPU inference. Zero Python at runtime.
+Built as pure Rust CLI. Uses vLLM (Python, managed as child process via `uv run`) for GPU inference.
 
 **Why:** Pass@128 evaluation for 6 theorem-proving models. Architecture templates and prompt formats match each model's official HF configuration.
 
-**How to apply:** `./run → 8) Do It All` for full pipeline, or `./run` for step-by-step. Full architecture documented in `ARCHITECTURE.md`.
+**How to apply:** `./run → 8) Do It All` for full pipeline, or `./run` for step-by-step. Full architecture documented in `ARCHITECTURE.md`. See [[official-model-requirements]] for exact HF repos and prompt formats.

@@ -120,6 +120,7 @@ impl EvaluationPipeline {
         let top_p = model_cfg.top_p;
         let base_seed = model_cfg.seed;
         let stop_sequences = model_cfg.stop_sequences.clone();
+        let architecture = model_cfg.architecture.clone();
 
         // Build job list ordered by theorem.
         let mut all_jobs: Vec<(Theorem, usize, serde_json::Value)> = Vec::with_capacity(total_jobs);
@@ -145,9 +146,16 @@ impl EvaluationPipeline {
             .map(|(theorem, attempt, body)| {
                 let url = url.clone();
                 let client = client.clone();
+                let architecture = architecture.clone();
                 async move {
-                    let text =
-                        InferenceEngine::generate_one_with_retry(&client, &url, body, 3).await;
+                    let text = InferenceEngine::generate_one_with_retry(
+                        &client,
+                        &url,
+                        body,
+                        3,
+                        &architecture,
+                    )
+                    .await;
                     (theorem, attempt, text)
                 }
             })

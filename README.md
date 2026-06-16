@@ -4,6 +4,8 @@ Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/mini
 
 **Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
 
+**Models**: [Goedel-Prover-DPO](https://huggingface.co/Goedel-LM/Goedel-Prover-DPO) · [Kimina-Prover-RL-1.7B](https://huggingface.co/AI-MO/Kimina-Prover-RL-1.7B) · [Goedel-Prover-V2-8B](https://huggingface.co/Goedel-LM/Goedel-Prover-V2-8B) · [DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B) · [Kimina-Prover-Distill-8B](https://huggingface.co/AI-MO/Kimina-Prover-Distill-8B) · [STP_model_Lean](https://huggingface.co/kfdong/STP_model_Lean)
+
 ## Quick Start
 
 ```bash
@@ -99,14 +101,14 @@ output/
 
 ## Supported Models
 
-| Model | Architecture | Chat Template | Prompt | ctx | max_tok | temp | top_p | seed |
-|-------|-------------|---------------|--------|-----|---------|------|-------|------|
-| kimina-prover-rl-1.7b | Qwen3 | ChatML | kimina | 40960 | 8096 | 0.6 | 0.95 | 42 |
-| goedel-prover-v2-8b | Qwen3 | ChatML | goedel_v2 | 40960 | 32768 | 0.6 | 0.95 | 30 |
-| deepseek-prover-v2-7b | DeepSeek V2 | Unicode ｜ | goedel_v2_nocot | 65536 | 8192 | 0.6 | 0.95 | 30 |
-| kimina-prover-distill-8b | Qwen3 | ChatML | kimina | 40960 | 8096 | 0.6 | 0.95 | 42 |
-| goedel-prover-dpo | Raw | none | simple | 4096 | 2048 | 1.0 | 0.95 | 1 |
-| stp-model-lean | Raw | none | deepseek_prover | 1024 | 1024 | 1.0 | 1.0 | 1 |
+| Model | HF Repo | Arch | ctx | max_tok | temp | top_p | seed |
+|-------|---------|------|-----|---------|------|-------|------|
+| kimina-prover-rl-1.7b | [AI-MO/Kimina-Prover-RL-1.7B](https://huggingface.co/AI-MO/Kimina-Prover-RL-1.7B) | Qwen3/ChatML | 40960 | 8096 | 0.6 | 0.95 | 42 |
+| kimina-prover-distill-8b | [AI-MO/Kimina-Prover-Distill-8B](https://huggingface.co/AI-MO/Kimina-Prover-Distill-8B) | Qwen3/ChatML | 40960 | 8096 | 0.6 | 0.95 | 42 |
+| goedel-prover-dpo | [Goedel-LM/Goedel-Prover-DPO](https://huggingface.co/Goedel-LM/Goedel-Prover-DPO) | Raw | 4096 | 2048 | 1.0 | 0.95 | 1 |
+| goedel-prover-v2-8b | [Goedel-LM/Goedel-Prover-V2-8B](https://huggingface.co/Goedel-LM/Goedel-Prover-V2-8B) | Qwen3/ChatML | 40960 | 32768 | 0.6 | 0.95 | 30 |
+| deepseek-prover-v2-7b | [deepseek-ai/DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B) | DeepSeek V2 | 65536 | 8192 | 0.6 | 0.95 | 30 |
+| stp-model-lean | [kfdong/STP_model_Lean](https://huggingface.co/kfdong/STP_model_Lean) | Raw | 1024 | 1024 | 1.0 | 1.0 | 1 |
 
 ## Design
 
@@ -125,7 +127,7 @@ output/
 
 ## Hardware
 
-- **GPU**: RTX 4060 8GB (Vulkan, `--parallel 2`) / RTX 5090 32GB (CUDA, `--parallel 48–128`)
+- **GPU**: RTX 5090 32GB (CUDA) primary. RTX 4060 8GB (Vulkan) for testing.
 - **BF16 safetensors → FP8 quantized at load time**: ~7-8 GB VRAM per 7-8B model
 - **KV cache**: q8_0 quantization, shared paged pool — `--parallel` does NOT linearly multiply VRAM
 

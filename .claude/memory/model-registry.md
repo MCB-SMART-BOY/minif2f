@@ -11,12 +11,12 @@ Defined in `src/models.rs`. Each model inherits from `defaults()` then overrides
 
 | CLI Name | HF Repo | Arch | Base | ctx | max_tok | temp | top_p | seed | Prompt | SysPrompt |
 |----------|---------|------|------|-----|---------|------|-------|------|--------|-----------|
-| `goedel-prover-dpo` | Goedel-LM/Goedel-Prover-DPO | raw | LLaMA-7B | 4096 | 2048 | 1.0 | 0.95 | 1 | simple | _(none)_ |
-| `kimina-prover-rl-1.7b` | AI-MO/Kimina-Prover-RL-1.7B | qwen3 | Qwen3-1.7B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `goedel-prover-v2-8b` | Goedel-LM/Goedel-Prover-V2-8B | qwen3 | Qwen3-8B | 40960 | 32768 | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
-| `deepseek-prover-v2-7b` | deepseek-ai/DeepSeek-Prover-V2-7B | deepseek_v2 | LLaMA-7B | 65536 | 8192 | 0.6 | 0.95 | 30 | goedel_v2_nocot | _(none)_ |
-| `kimina-prover-distill-8b` | AI-MO/Kimina-Prover-Distill-8B | qwen3 | Qwen3-8B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `stp-model-lean` | kfdong/STP_model_Lean | raw | DS-Prover-V1.5 | 1024 | 1024 | 1.0 | 1.0 | 1 | deepseek_prover | _(none)_ |
+| `goedel-prover-dpo` | [Goedel-LM/Goedel-Prover-DPO](https://huggingface.co/Goedel-LM/Goedel-Prover-DPO) | raw | LLaMA-7B | 4096 | 2048 | 1.0 | 0.95 | 1 | simple | _(none)_ |
+| `kimina-prover-rl-1.7b` | [AI-MO/Kimina-Prover-RL-1.7B](https://huggingface.co/AI-MO/Kimina-Prover-RL-1.7B) | qwen3 | Qwen3-1.7B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `goedel-prover-v2-8b` | [Goedel-LM/Goedel-Prover-V2-8B](https://huggingface.co/Goedel-LM/Goedel-Prover-V2-8B) | qwen3 | Qwen3-8B | 40960 | 32768 | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
+| `deepseek-prover-v2-7b` | [deepseek-ai/DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B) | deepseek_v2 | LLaMA-7B | 65536 | 8192 | 0.6 | 0.95 | 30 | goedel_v2_nocot | _(none)_ |
+| `kimina-prover-distill-8b` | [AI-MO/Kimina-Prover-Distill-8B](https://huggingface.co/AI-MO/Kimina-Prover-Distill-8B) | qwen3 | Qwen3-8B | 40960 | 8096 | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
+| `stp-model-lean` | [kfdong/STP_model_Lean](https://huggingface.co/kfdong/STP_model_Lean) | raw | DS-Prover-V1.5 | 1024 | 1024 | 1.0 | 1.0 | 1 | deepseek_prover | _(none)_ |
 
 ## Architecture Details
 

@@ -15,15 +15,11 @@ RUN_ID_PREFIX="${RUN_ID_PREFIX:-v128-$(date +%Y%m%d)}"
 #     p ≈ available_KV / (per_seq_KV * safety_factor)
 #   LLaMA-7B (no GQA, kv=512KB/tok FP16): KV-heavy, conservative.
 #   Qwen3 (GQA, kv=128KB/tok FP16): 4× lighter KV, can push higher.
-# Model order: un-run models first, completed models re-run last.
-# kimina-prover-rl-1.7b is currently running in the existing tmux session.
+# Model order: resume from checkpoint, only unfinished models.
 MODELS=(
-  "goedel-prover-v2-8b|data/models/goedel-prover-v2-8b|16"                  # 🆕 Qwen3-8B, GQA, CoT~5K-21K tok/req → KVcache 0.7-3GB/seq. p=16 fits 22GB KV cache.
-  "kimina-prover-distill-8b|data/models/kimina-prover-distill-8b|48"         # 🆕 Qwen3-8B, GQA, ctx(8096) → p=48 (↑36→48)
-  "stp-model-lean|data/models/stp-model-lean|64"                             # 🆕 DS-Prover-V1.5, ctx(1024) → p=64 (↑32→64)
-  "goedel-prover-dpo|data/models/goedel-prover-dpo|40"                       # 🔄 LLaMA-7B, no GQA, KV 54MB/seq → p=40 (↑24→40, KV非瓶颈)
-  "deepseek-prover-v2-7b|data/models/deepseek-prover-v2-7b|32"              # 🔄 LLaMA-7B, non-CoT 443tok/seq → KV 208MB/seq → p=32 (↑20→32, KV非瓶颈)
-  "kimina-prover-rl-1.7b|data/models/kimina-prover-rl-1.7b|64"               # 🔄 Qwen3-1.7B, FP8~2GB, GQA → p=64 (↑48→64)
+  "kimina-prover-distill-8b|data/models/kimina-prover-distill-8b|48"         # 1st: resume from 66/488
+  "deepseek-prover-v2-7b|data/models/deepseek-prover-v2-7b|32"              # 2nd: LLaMA-7B, non-CoT → p=32
+  "goedel-prover-v2-8b|data/models/goedel-prover-v2-8b|16"                  # LAST: Qwen3-8B, CoT → SLOW
 )
 
 main() {
@@ -146,7 +142,7 @@ WORKEREOF
     tmux send-keys -t "$SESSION:0" \
         "echo 'Sequential — models: ${model_args[*]}'" Enter
     tmux send-keys -t "$SESSION:0" \
-        "bash '$worker' ${model_args[*]@Q}" Enter
+        "export ATTEMPTS='$ATTEMPTS' RUN_ID_PREFIX='$RUN_ID_PREFIX'; bash '$worker' ${model_args[*]@Q}" Enter
 
     echo -e "  ${BOLD}Started in tmux session '${SESSION}'${NC}"
     echo ""

@@ -13,12 +13,11 @@ curl -s --noproxy '*' \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "<|im_start|>user\nThink about and solve the following problem step by step in Lean 4.\n\n# Formal statement:\n```lean4\nimport Mathlib\n\ntheorem test : 1 + 1 = 2 := by\n```\n<|im_end|>\n<|im_start|>assistant\n",
-    "n_predict": 256,
+    "max_tokens": 256,
     "temperature": 0.6,
     "top_p": 0.95,
     "seed": 42,
-    "stop": ["<|im_end|>", "</s>"],
-    "n_probs": 0
+    "stop": ["<|im_end|>", "</s>"]
   }' http://localhost:8080/v1/completions | python3 -c "
 import json,sys
 d=json.load(sys.stdin)

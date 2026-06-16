@@ -203,24 +203,24 @@ Key functions:
 
 ## 6 Models (Official Specs)
 
-| CLI Name | Arch | Base | ctx | max_tok | temp | top_p | seed | Prompt | SysPrompt |
-|----------|------|------|-----|---------|------|-------|------|--------|-----------|
-| `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | **40960** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `goedel-prover-dpo` | **raw** | LLaMA-7B | 4096 | **2048** | 1.0 | 0.95 | 1 | simple | _(none)_ |
-| `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | **40960** | **32768** | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ |
-| `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | **65536** | 8192 | 0.6 | 0.95 | 30 | **goedel_v2_nocot** | _(none)_ |
-| `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | **40960** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 |
-| `stp-model-lean` | **raw** | DS-Prover-V1.5 | **1024** | **1024** | 1.0 | 1.0 | 1 | **deepseek_prover** | _(none)_ |
+| CLI Name | Arch | Base | ctx | max_tok | temp | top_p | seed | Prompt | SysPrompt | HF Repo |
+|----------|------|------|-----|---------|------|-------|------|--------|-----------|---------|
+| `kimina-prover-rl-1.7b` | qwen3 | Qwen3-1.7B | **40960** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 | [AI-MO/Kimina-Prover-RL-1.7B](https://huggingface.co/AI-MO/Kimina-Prover-RL-1.7B) |
+| `goedel-prover-dpo` | **raw** | LLaMA-7B | 4096 | **2048** | 1.0 | 0.95 | 1 | simple | _(none)_ | [Goedel-LM/Goedel-Prover-DPO](https://huggingface.co/Goedel-LM/Goedel-Prover-DPO) |
+| `goedel-prover-v2-8b` | qwen3 | Qwen3-8B | **40960** | **32768** | 0.6 | 0.95 | 30 | goedel_v2 | _(none)_ | [Goedel-LM/Goedel-Prover-V2-8B](https://huggingface.co/Goedel-LM/Goedel-Prover-V2-8B) |
+| `deepseek-prover-v2-7b` | deepseek_v2 | LLaMA-7B | **65536** | 8192 | 0.6 | 0.95 | 30 | **goedel_v2_nocot** | _(none)_ | [deepseek-ai/DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B) |
+| `kimina-prover-distill-8b` | qwen3 | Qwen3-8B | **40960** | **8096** | 0.6 | 0.95 | 42 | kimina | expert math+Lean4 | [AI-MO/Kimina-Prover-Distill-8B](https://huggingface.co/AI-MO/Kimina-Prover-Distill-8B) |
+| `stp-model-lean` | **raw** | DS-Prover-V1.5 | **1024** | **1024** | 1.0 | 1.0 | 1 | **deepseek_prover** | _(none)_ | [kfdong/STP_model_Lean](https://huggingface.co/kfdong/STP_model_Lean) |
 
 Bold values are sourced from explicit HuggingFace model cards, HuggingFace `config.json` / `tokenizer_config.json`, or official eval scripts. When those sources differ, `ctx` follows the model card if it explicitly sets `max_model_len`; otherwise it follows model `config.json` (`max_position_embeddings`).
 
-### Official sources:
-1. Goedel-Prover-DPO — raw completion prompt. Prompt: "Complete the following Lean 4 code with explanatory comments..." + open ```lean4 block. `full_code = extract_code(model_input + model_output)` in the official eval script. EOS=100001, max_tokens=2048, temperature=1.0, top_p=0.95, seed=1.
-2. Kimina-Prover-RL-1.7B — Qwen3 ChatML. System: "expert in mathematics and proving theorems in Lean 4". Prompt: "Think about and solve..." with `# Problem:` and `# Formal statement:`. NO `sorry` — theorem ends with `:= by`. EOS=151645, max_tokens=8096.
-3. Goedel-Prover-V2-8B — Qwen3 ChatML, user message only (NO system prompt). Prompt: "Complete the following Lean 4 code:" + proof plan request. `formal_statement` includes `sorry`. EOS=151645, `max_position_embeddings=40960`, max_new_tokens=32768, seed=30.
-4. DeepSeek-Prover-V2-7B — DeepSeek V2 ChatML, user message only (NO system prompt). Uses **non-CoT** prompt (no proof plan request). EOS=100001, 65536 context (config.json), max_new_tokens=8192, seed=30.
-5. Kimina-Prover-Distill-8B — Qwen3 ChatML. System: "expert in mathematics and Lean 4". Same prompt as Kimina-RL. NO `sorry`. EOS=151645, max_tokens=8096.
-6. STP_model_Lean — Completion (NOT chat). `max_model_len=1024` (official eval), `max_tokens=1024`, `temperature=1.0`, `top_p=1.0`, seed=1. Prompt: "Complete the following Lean 4 code:" + open ```lean4 block with header+statement (no informal_prefix). `statement = formal_statement.rsplit('sorry', 1)[0].strip()`. EOS=100001.
+### Official sources (HuggingFace model cards):
+1. [Goedel-Prover-DPO](https://huggingface.co/Goedel-LM/Goedel-Prover-DPO) — raw completion prompt. Prompt: "Complete the following Lean 4 code with explanatory comments..." + open ```lean4 block. `full_code = extract_code(model_input + model_output)` in the official eval script. EOS=100001, max_tokens=2048, temperature=1.0, top_p=0.95, seed=1.
+2. [Kimina-Prover-RL-1.7B](https://huggingface.co/AI-MO/Kimina-Prover-RL-1.7B) — Qwen3 ChatML. System: "expert in mathematics and proving theorems in Lean 4". Prompt: "Think about and solve..." with `# Problem:` and `# Formal statement:`. NO `sorry` — theorem ends with `:= by`. EOS=151645, max_tokens=8096.
+3. [Goedel-Prover-V2-8B](https://huggingface.co/Goedel-LM/Goedel-Prover-V2-8B) — Qwen3 ChatML, user message only (NO system prompt). Prompt: "Complete the following Lean 4 code:" + proof plan request. `formal_statement` includes `sorry`. EOS=151645, `max_position_embeddings=40960`, max_new_tokens=32768, seed=30.
+4. [DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B) — DeepSeek V2 ChatML, user message only (NO system prompt). Uses **non-CoT** prompt (no proof plan request). EOS=100001, 65536 context (config.json), max_new_tokens=8192, seed=30.
+5. [Kimina-Prover-Distill-8B](https://huggingface.co/AI-MO/Kimina-Prover-Distill-8B) — Qwen3 ChatML. System: "expert in mathematics and Lean 4". Same prompt as Kimina-RL. NO `sorry`. EOS=151645, max_tokens=8096.
+6. [STP_model_Lean](https://huggingface.co/kfdong/STP_model_Lean) — Completion (NOT chat). `max_model_len=1024` (official eval), `max_tokens=1024`, `temperature=1.0`, `top_p=1.0`, seed=1. Prompt: "Complete the following Lean 4 code:" + open ```lean4 block with header+statement (no informal_prefix). `statement = formal_statement.rsplit('sorry', 1)[0].strip()`. EOS=100001.
 
 ## Checkpointing
 

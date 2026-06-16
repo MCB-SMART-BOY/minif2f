@@ -42,7 +42,7 @@ Per-model inference parameters, aligned to official HuggingFace specs.
 | `param_count_b` | Option\<f64\> | Billion parameters (for display) |
 | `quantization` | Option\<String\> | e.g. `"awq"`, `"q4_k_m"` |
 | `max_model_len` | u32 | Max context length for vLLM `--max-model-len` |
-| `max_tokens` | u32 | `n_predict` (max output tokens per completion) |
+| `max_tokens` | u32 | Max output tokens per completion |
 | `temperature` | f64 | Sampling temperature (default 0.6) |
 | `top_p` | f64 | Nucleus sampling (default 0.95) |
 | `seed` | u64 | Base seed (per-attempt seed = base + attempt_index) |
@@ -350,30 +350,28 @@ struct InferenceEngine {
 ### `InferenceEngine::start(config, model_path, port, uv_project_dir, parallel)` → `Result<Self>`
 **Spawns vLLM via `uv run` as a child process** and waits for it to be ready.
 
-**vLLM flags (via `uv run server.py`):**
-| Flag | Value | Purpose |
-|------|-------|---------|
-| model_path | positional | Model directory (HF safetensors) |
-| `--port` | port | HTTP port |
-| `-ngl` | 99 | GPU layers (all) |
-| `--max-model-len` | `(max_tokens + 4096).min(max_model_len)` | Per-sequence context window |
-| `--max-num-seqs` | parallel | Max concurrent sequences (continuous batching) |
-| `--parallel` | parallel | Concurrent GPU slots |
-| `--gpu-memory-utilization` | 0.92 | GPU memory fraction for vLLM |
-| `--cache-reuse` | 256 | Cache reuse window |
-| `--dtype` | half | Weight precision (FP16) |
-| `--quantization` | fp8 | Weight quantization (FP8 runtime) |
-| `--api-key` | minif2f | API key for auth |
+**vLLM command:**
+```
+uv run --directory <uv_project_dir> python -m vllm.entrypoints.openai.api_server \
+  --model <model_path> --port <port> \
+  --max-model-len <per_seq> --max-num-seqs <parallel> \
+  --gpu-memory-utilization 0.92 --dtype half --trust-remote-code \
+  --quantization fp8 --tokenizer-mode slow \
+  --disable-custom-all-reduce --disable-log-stats
+```
 
-**Health check loop**: Polls `GET /health` every 500ms–1s. Status 200 = ready, 503 = model still loading. Timeout after 2 minutes → kill server, bail.
+Environment variables: `CUDA_HOME`, `VLLM_USE_FLASHINFER_SAMPLER=0`, `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, `OMP_NUM_THREADS=""`.
 
 Stderr is redirected to `/tmp/vllm-server-{port}.log`.
 
-### `InferenceEngine::generate_one_with_retry(client, url, body, max_retries)` → `String`
-**Static method** — sends a single `/completion` POST request with exponential backoff retry.
+**Health check loop**: Polls `GET /health` every 2s. Status 200 = ready. Timeout after 5 minutes → kill server, bail.
 
-- Sends JSON body: `{"prompt", "n_predict", "temperature", "top_p", "seed", "stop", "n_probs"}`
-- Extracts `json["content"]` as string
+### `InferenceEngine::generate_one_with_retry(client, url, body, max_retries)` → `String`
+**Static method** — sends a single `POST /v1/completions` request with exponential backoff retry.
+
+- Sends OpenAI-compatible JSON body: `{"prompt", "max_tokens", "temperature", "top_p", "seed", "stop"}`
+- Extracts `json["choices"][0]["text"]` as string
+- Runs through `decode_llama_byte_fallback()` to fix LLaMA tokenizer byte-fallback encoding
 - Retries on HTTP errors and JSON parse errors (up to `max_retries` times)
 - Backoff: 1s, 2s, 4s...
 - Returns `""` on final failure (graceful degradation)
@@ -458,7 +456,7 @@ Constructor.
 #### Phase 1: Build Job List
 For each pending theorem × `completion_attempts`:
 - Build prompt via `PromptBuilder::build(theorem)`
-- Create JSON body: `{"prompt", "n_predict", "temperature", "top_p", "seed", "stop"}`
+- Create JSON body: `{"prompt", "max_tokens", "temperature", "top_p", "seed", "stop"}`
 - Seed = `base_seed + attempt_index` (ensures deterministic but diverse sampling)
 - Total jobs = `pending_theorems × completion_attempts`
 
@@ -579,7 +577,7 @@ Theorem { name, split, header, informal_prefix, formal_statement, goal }
   │     └─► Chat template wrap (qwen3 / deepseek_v2 / deepseek_coder / raw)
   │
   ▼
-Full prompt string → JSON body {prompt, n_predict, temperature, top_p, seed, stop}
+Full prompt string → JSON body {prompt, max_tokens, temperature, top_p, seed, stop}
   │
   ├─► buffer_unordered(concurrency) → HTTP POST /completion
   │     │
@@ -679,12 +677,12 @@ When a theorem's configured attempts are complete, `rayon::par_iter()` splits ex
 - **BF16 safetensors → FP8 at load time**: ~7-8 GB VRAM per 7-8B model, ~1.7 GB per 1.7B
 - **KV cache**: vLLM PagedAttention — dynamically managed, not static slot allocation
 - **Per-model parallelism** (current `scripts/generate-all.sh` values):
-  - Goedel-Prover-DPO: 16
-  - DeepSeek-Prover-V2-7B: 7
-  - Kimina-Prover-RL-1.7B: 24
-  - Goedel-Prover-V2-8B: 8
-  - Kimina-Prover-Distill-8B: 24
-  - STP_model_Lean: 16
+  - Kimina-Prover-Distill-8B: 48
+  - STP_model_Lean: 64
+  - Goedel-Prover-DPO: 40
+  - DeepSeek-Prover-V2-7B: 32
+  - Kimina-Prover-RL-1.7B: 64
+  - Goedel-Prover-V2-8B: 16
 
 ---
 

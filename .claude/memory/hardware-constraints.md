@@ -15,16 +15,16 @@ metadata:
 - **1.7B models (FP8)**: ~1.7 GB VRAM for weights
 - **Remaining VRAM (~24 GB)**: KV cache (vLLM PagedAttention)
 
-## Per-Model --max-num-seqs (empirically tested on RTX 5090 32GB)
+## Per-Model --max-num-seqs (per `scripts/generate-all.sh`, empirically tested on RTX 5090 32GB)
 
 | Model | parallel | Rationale |
 |-------|----------|-----------|
-| goedel-prover-dpo | 10 | LLaMA-7B, 13GB, tested p=10✅ p=12⚠️ |
-| deepseek-prover-v2-7b | 6 | LLaMA-7B + long ctx (8192), conservative |
-| kimina-prover-rl-1.7b | 38 | Qwen3-1.7B, 3.4GB + GQA, light model |
-| goedel-prover-v2-8b | 8 | Qwen3-8B, 16GB + long ctx (32768) |
-| kimina-prover-distill-8b | 30 | Qwen3-8B, 16GB + GQA |
-| stp-model-lean | 16 | DS-Prover-V1.5, 13GB + short ctx (1024) |
+| kimina-prover-distill-8b | 48 | Qwen3-8B, 16GB + GQA |
+| stp-model-lean | 64 | DS-Prover-V1.5, 13GB + short ctx (1024) |
+| goedel-prover-dpo | 40 | LLaMA-7B, 13GB, no GQA |
+| deepseek-prover-v2-7b | 32 | LLaMA-7B + long ctx (8192), no GQA |
+| kimina-prover-rl-1.7b | 64 | Qwen3-1.7B, 3.4GB + GQA, light model |
+| goedel-prover-v2-8b | 16 | Qwen3-8B, 16GB + long ctx (32768), CoT |
 
 ## vLLM Flags
 ```

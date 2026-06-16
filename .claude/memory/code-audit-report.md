@@ -88,9 +88,9 @@ Err(e) => eprintln!("Warning: failed to load '{split}' split: {e}"),
 
 **Mitigation**: Already mitigated by the fence_start priority order. Only bare ``` blocks are affected, and those are rare in practice.
 
-### 🟢 FINDING-7: Stale "llama-server" comment (prompts.rs:41)
+### 🟢 FINDING-7: Stale "llama-server" references — FIXED
 
-Line 41: `// llama-server via tokenizer config (add_bos_token)` should say `vLLM`. Purely cosmetic.
+All project documentation (README, ARCHITECTURE, CLAUDE.md, memory files, skills) updated to use "vLLM" instead of "llama-server". API parameter names (`n_predict`→`max_tokens`, `n_probs` removed) corrected throughout.
 
 ## Test Coverage Matrix
 
