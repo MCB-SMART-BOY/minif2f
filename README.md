@@ -86,17 +86,29 @@ output/
 ├── run                    # Entry point (interactive menu)
 ├── scripts/
 │   ├── setup.sh           # One-time deployment
-│   └── generate-all.sh    # Sequential generation (tmux, single slot, 6 models)
-└── src/
-    ├── main.rs            # CLI (clap)
-    ├── lib.rs             # Modules
-    ├── config.rs          # ModelConfig, PipelineConfig
-    ├── models.rs          # 6-model registry
-    ├── data.rs            # Dataset + Theorem
-    ├── prompts.rs         # Chat templates + proof extraction
-    ├── inference.rs       # vLLM server manager
-    ├── checkpoint.rs      # Crash recovery
-    └── pipeline.rs        # Orchestrator → two-layer JSON
+│   ├── generate-all.sh    # Sequential vLLM generation (5 models)
+│   └── stp_runner.py      # STP standalone HF generate runner
+├── src/                   # Rust orchestrator (9 files, ~650 LOC)
+│   ├── main.rs            # CLI (clap)
+│   ├── config.rs          # ModelConfig, PipelineConfig
+│   ├── models.rs          # 6-model registry
+│   ├── data.rs            # Dataset + Theorem
+│   ├── prompts.rs         # Chat templates + proof extraction
+│   ├── inference.rs       # vLLM server manager
+│   ├── checkpoint.rs      # Crash recovery
+│   └── pipeline.rs        # Orchestrator → two-layer JSON
+├── .claude/
+│   ├── MEMORY.md          # Three-layer knowledge index
+│   ├── memory/            # 7 numbered project knowledge files
+│   ├── workflows/         # 5 structured workflows
+│   ├── hooks/             # Automation scripts (quality, pre-generate, verify)
+│   ├── templates/         # New model + incident templates
+│   └── archive/           # Historical incidents (not loaded into context)
+├── output/
+│   ├── raw_output/        # Unfiltered model completions
+│   └── lean_code/         # Extracted + validated Lean proofs
+└── results/checkpoints/   # Crash recovery state
+```
 ```
 
 ## Supported Models

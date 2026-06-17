@@ -1,12 +1,30 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
 ## Project
 
 Generate 128 proof attempts per theorem for [miniF2F](https://github.com/openai/miniF2F) (488 theorems) using 6 Lean 4 theorem-proving LLMs. Output is two flat JSON files per model: raw output + extracted Lean code.
 
-**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
+**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for 5 models + HF `model.generate()` for STP. FP8 quantization.
+
+## Claude Code Workflow
+
+This project uses a structured `.claude/` configuration. Key entry points:
+
+| Task | Workflow | Command |
+|------|----------|---------|
+| Run pipeline | `workflows/generate.md` | `./run` or `bash scripts/generate-all.sh` |
+| Check progress | `workflows/status.md` | "看进度" |
+| Debug output | `workflows/debug.md` | "检查乱码" |
+| Code change | `workflows/code-change.md` | Any code edit triggers |
+| Run STP | `workflows/stp.md` | `python scripts/stp_runner.py` |
+
+Quality gates (MUST pass before commit): `bash .claude/hooks/quality.sh`
+Pre-generate checks: `bash .claude/hooks/pre-generate.sh`
+Output validation: `bash .claude/hooks/verify-output.sh <model>`
+
+Knowledge index: `.claude/MEMORY.md` (three-layer: always-load / on-demand / reference)
 
 ## Commands
 

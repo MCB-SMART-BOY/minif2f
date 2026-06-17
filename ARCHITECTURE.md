@@ -4,7 +4,7 @@
 
 **Goal**: Generate 128 proof attempts per theorem for miniF2F (488 theorems) using 6 Lean 4 theorem-proving LLMs using vLLM with FP8 quantization on a single RTX 5090 32GB GPU.
 
-**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
+**Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for 5 models + HF `model.generate()` for STP. FP8 quantization.
 
 **Output**: Two flat JSON files per model:
 - `output/raw_output/<model>.json` — unfiltered model completions
