@@ -1,0 +1,46 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(git:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(sort:*)",
+      "Bash(wc:*)",
+      "Bash(echo:*)",
+      "Bash(mkdir:*)",
+      "Bash(rm:*)",
+      "Bash(cp:*)",
+      "Bash(chmod:*)",
+      "Bash(du:*)",
+      "Bash(ps:*)",
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(fuser:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(tmux:*)",
+      "Bash(uv:*)",
+      "Bash(which:*)",
+      "Bash(python3:*)",
+      "Bash(curl:*)",
+      "Bash(awk:*)",
+      "Bash(export:*)",
+      "Bash(sleep:*)",
+      "WebSearch(*)",
+      "WebFetch(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)"
+    ]
+  },
+  "hooks": {
+    "PreCommit": [
+      "bash .claude/hooks/quality.sh"
+    ]
+  }
+}

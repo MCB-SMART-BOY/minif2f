@@ -1,13 +1,33 @@
-- [Project Purpose](memory/project-purpose.md) — 128 proofs/theorem × 6 models → two-layer JSON, validate_lean_code gate
-- [Official Model Requirements](memory/official-model-requirements.md) — Complete reference: exact prompts, params, EOS tokens, papers for all 6 models
-- [Hardware Constraints](memory/hardware-constraints.md) — RTX 5090 32GB CUDA, vLLM FP8, per-model --max-num-seqs
-- [Pipeline Architecture](memory/pipeline-architecture.md) — buffer_unordered GPU → rayon par_iter CPU → validate → two-layer JSON
-- [Model Registry](memory/model-registry.md) — 6 models with official config.json specs, architectures, EOS tokens, prompt formats
-- [Code Quality](memory/code-quality-standards.md) — cargo fmt + clippy + test, 37 tests
-- [Git Commit Style](memory/git-commit-style.md) — No Co-Authored-By lines in commits
-- [Kimina-Prover Think Mode](memory/kimina-prover-think-mode.md) — RL format reward: `<think>` block required, empty think breaks model
-- [Checkpoint Resume Fix](memory/checkpoint-resume-fix.md) — Loads existing JSON on resume; no data loss
-- [Goedel-DPO Prompt Fix](memory/goedel-dpo-prompt-fix.md) — Historical: chat-prepopulation fix; current code uses official raw prompt
-- [Code Audit Report](memory/code-audit-report.md) — Full audit findings: 0 critical, 2 high, 4 medium, 1 low
-- [CLAUDE.md](../CLAUDE.md) — Primary project instructions (commands, architecture, data flow, model specs)
-- [ARCHITECTURE.md](../ARCHITECTURE.md) — Full function-level architecture documentation (all 9 source files, end-to-end data flow)
+# Project Knowledge Index
+
+## Always-Load (🔴 session-critical)
+These define the project and must be loaded at the start of every session.
+
+- [[00-identity]]     — Project: 6 models × 488 theorems × 128 attempts → Pass@128 eval
+- [[01-architecture]] — Code structure: file map, data flow, module dependencies
+- [[02-models]]       — 6-model registry: official specs, prompt formats, sampling params, EOS tokens, HF URLs, paper citations
+
+## On-Demand (🟡 task-specific)
+Load when the current task touches these areas.
+
+- [[03-pipeline]]     — Pipeline internals: buffer_unordered + rayon extraction + checkpoint + incremental writes
+- [[04-hardware]]      — RTX 5090 32GB CUDA, vLLM FP8, per-model --max-num-seqs values
+- [[05-quality]]       — Quality gates (cargo fmt/clippy/test 69/69), output validation criteria, git style
+
+## Reference-Only (🟢 cited explicitly)
+Only load when specifically referenced.
+
+- [[06-decisions]]     — ADR: vLLM vs HF generate, continuous request pool, byte-fallback decoder, STP decision
+
+## External Documentation
+
+- [[CLAUDE.md]]        — Primary project instructions + model config summary
+- [[ARCHITECTURE.md]]  — Full function-level architecture (all source files, end-to-end data flow)
+
+## Archive
+Historical incidents and old audit reports — not loaded into context:
+
+- [incidents/2026-06-05-dpo-empty.md](archive/incidents/)
+- [incidents/2026-06-05-kimina-think.md](archive/incidents/)
+- [incidents/2026-06-10-checkpoint-loss.md](archive/incidents/)
+- [code-audit-2026-06-11.md](archive/code-audit-2026-06-11.md)
