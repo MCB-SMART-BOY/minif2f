@@ -131,7 +131,22 @@ output/
 - **Checkpoint resume**: Loads existing raw_output + lean_code JSON on startup, merges tuples. Previously-completed theorems are not re-generated.
 - **Incremental writes**: JSON written every 20 theorems — crash resilience independent of checkpoint system.
 - **Two-layer output**: `output/raw_output/` (unfiltered) + `output/lean_code/` (extracted + validated). Same flat JSON format in both.
-- **STP model**: Raw architecture (no chat template), DeepSeek Prover format with an open ```lean4 block, no `sorry`, no informal_prefix. `max_model_len=1024`, `top_p=1.0`, seed 1. Matches the official STP eval scripts.
+- **STP model**: Uses standalone `scripts/stp_runner.py` with HF `model.generate()` (BF16 native). vLLM does not support `begin_suppress_tokens` required by this model, causing 100% empty output when attempted. See `workflows/stp.md`.
+- **Byte-fallback decoder**: Architecture-conditional — only applied to LLaMA tokenizer models (DPO, DeepSeek, STP). Qwen3 models pass through unchanged. See [[06-decisions]].
+- **Encoding validation**: Output checked for U+FFFD, Cyrillic, and Latin-1 leakage. LLaMA models may have residual Latin-1 leakage from vLLM tokenizer incomplete byte-fallback handling.
+
+## Industrialization Roadmap
+
+| Phase | Description | Status |
+|:-----:|-------------|:------:|
+| 1 | `.claude/` workflow structure + documentation | ✅ Done |
+| 2 | Provenance: `_metadata` block in output JSON | 📋 Planned |
+| 3 | Config-as-Code: YAML model configs (from `models.rs`) | 📋 Planned |
+| 4 | Structured errors + JSON-line logging | 📋 Planned |
+| 5 | CI/CD: GitHub Actions quality gates + smoke tests | 📋 Planned |
+| 6 | Backend trait: `InferenceBackend` abstraction | 📋 Planned |
+
+See `CLAUDE.md` > Industrialization Roadmap and `ARCHITECTURE.md` > Future Architecture for full design.
 - **128 attempts**: Default. Configurable via `-n`. Used for Pass@k evaluation.
 - **Sequential generation**: `generate-all.sh` runs all configured models one at a time on port 8080 with per-model `--parallel` values. Single tmux session.
 - **GPU**: RTX 5090 32GB CUDA. KV cache q8_0 shared paged pool — `--parallel` does NOT linearly multiply VRAM.

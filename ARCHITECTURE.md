@@ -787,4 +787,137 @@ pipeline.rs
 7. **Chat template prepopulation** — DeepSeek Coder gets `### Response:\n```lean4\n{code}` to keep it in code-generation mode
 8. **Conditional system prompt** — Qwen3 template omits system block when `system_prompt` is empty (Goedel-V2 official behavior)
 9. **No BOS in template** — vLLM/tokenizer adds it automatically, prevents double BOS
+10. **Architecture-conditional decoder** — byte-fallback only applied to LLaMA tokenizer models (raw, deepseek_v2), Qwen3 passes through
+11. **Incremental JSON writes** — every 20 theorems, write both JSONs to disk
+
+---
+
+## Future Architecture (Blueprint)
+
+The following sections describe the target architecture after industrialization phases.
+
+### Modular Source Layout
+
+```
+src/
+├── cli.rs                  # CLI entry (from main.rs)
+├── config/
+│   ├── mod.rs              # Config loading (from YAML)
+│   ├── model.rs            # ModelConfig (serde from YAML)
+│   ├── pipeline.rs         # PipelineConfig
+│   └── validation.rs       # Config validation rules
+├── backend/
+│   ├── mod.rs              # InferenceBackend trait
+│   ├── vllm.rs             # VllmBackend: spawn vLLM, HTTP /v1/completions
+│   └── hf_generate.rs      # HfGenerateBackend: spawn Python, stdin/stdout JSON
+├── prompts/
+│   ├── mod.rs              # PromptBuilder (from YAML templates)
+│   └── extraction.rs       # extract_proof + validate_lean_code
+├── pipeline/
+│   ├── mod.rs              # EvaluationPipeline::run()
+│   ├── checkpoint.rs       # CheckpointManager
+│   └── flush.rs            # flush_batch (rayon extraction)
+├── provenance/
+│   ├── mod.rs              # Provenance struct
+│   ├── collect.rs          # Gather: git, nvidia-smi, model info
+│   └── write.rs            # Embed _metadata into output JSON
+├── logging/
+│   ├── mod.rs              # StructuredLogger
+│   └── events.rs           # LogEvent enum (typed events)
+├── errors.rs               # PipelineError enum hierarchy
+└── data.rs                 # Theorem + dataset loading
+```
+
+### InferenceBackend Trait
+
+```rust
+#[async_trait]
+pub trait InferenceBackend: Send + Sync {
+    async fn start(&mut self) -> Result<(), PipelineError>;
+    async fn health_check(&self) -> bool;
+    async fn generate(&self, prompt: &str, params: &GenerationParams)
+        -> Result<GenerationResult, PipelineError>;
+    fn recommended_concurrency(&self) -> usize;
+    fn architecture(&self) -> Architecture;
+    async fn stop(self: Box<Self>) -> Result<(), PipelineError>;
+}
+
+pub enum Architecture { Qwen3, Llama }
+
+pub struct GenerationResult {
+    pub text: String,                    // Already encoding-corrected
+    pub tokens_generated: u32,
+    pub finish_reason: FinishReason,     // Stop | Length | Truncated
+    pub generation_duration_ms: u64,
+}
+```
+
+### Error Hierarchy
+
+```
+PipelineError
+├── Environment    (GpuNotFound, PortInUse, ModelFileMissing) → no retry
+├── Transient      (NetworkTimeout, VllmBusy)                  → retry 3x
+├── DataError      (EmptyOutput, EncodingCorrupt)              → skip attempt
+└── ModelError     (VllmStartFailed, AllEmpty)                 → skip model
+```
+
+### Validation Pipeline (per model)
+
+```
+CHECK-1: Structure  — JSON valid, 488 theorems, 128 attempts each
+CHECK-2: Encoding   — per-architecture thresholds (Qwen3: 0 U+FFFD, Llama: <1%)
+CHECK-3: Quality    — non-empty rate, extraction rate, duplication rate
+CHECK-4: Sampling   — 25 samples checked for basic Lean validity
+CHECK-5: Consistency — diff vs previous run of same model
+Result:  PASS (continue) | WARN (record + continue) | ERROR (pause + ask) | FATAL (stop)
+```
+
+### Run Lifecycle
+
+```
+1. INIT       → run_id, manifest.partial.json, structured log
+2. PREFLIGHT  → GPU free, port free, model exists, config valid
+3. BACKEND    → start vLLM/HF, health check
+4. GENERATE   → buffer_unordered loop, checkpoint, incremental write
+5. BACKEND    → stop, free GPU
+6. VERIFY     → 5-level check, report generation
+7. PROVENANCE → finalize manifest, embed _metadata
+8. NEXT       → loop to step 2 for next model, or COMPLETE
+
+CRASH   → manifest.partial preserved, checkpoint preserved
+RESUME  → load manifest + checkpoint, continue from breakpoint
+```
+
+### Output Schema (v2)
+
+```json
+{
+  "_metadata": { /* provenance — self-describing */ },
+  "models": {
+    "<model>": {
+      "<theorem>": {
+        "attempt_1": {
+          "raw": "...",
+          "lean": "...",
+          "finish_reason": "stop"
+        }
+      }
+    }
+  }
+}
+```
+
+### Config YAML Format (configs/models/<name>.yaml)
+
+```yaml
+name: goedel-prover-dpo
+hf_repo: Goedel-LM/Goedel-Prover-DPO
+backend: { type: vllm, quantization: fp8 }
+architecture: { type: raw, tokenizer: llama }
+prompt: { format: simple, include_sorry: false, code_block: open }
+inference: { max_model_len: 4096, max_tokens: 2048, temperature: 1.0, top_p: 0.95, seed: 1 }
+validation: { u_fffd_max_rate: 0.001, min_extraction_rate: 0.70 }
+sources: { hf_url: "...", paper: "...", github: "..." }
+```
 10. **Atomic checkpoint writes** — temp file + rename for crash-safe persistence

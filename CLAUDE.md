@@ -261,13 +261,71 @@ incremental writes, a crash loses all proofs generated since the last complete t
 - **Per-model --max-num-seqs** (see `scripts/generate-all.sh` for current values): 9–38 depending on model VRAM needs
 - vLLM's **continuous batching** eliminates idle slot waste — requests are batched dynamically
 
-## Model Conversion (one-time per model)
+## Industrialization Roadmap
 
-```bash
-source tools/venv/bin/activate.fish
-export HF_TOKEN="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"
+Current codebase is a working prototype. The following phases progressively industrialize it.
 
-python tools/llama.cpp/convert_hf_to_gguf.py data/models/<name> \
-  --outfile models/<name>.gguf --outtype f16     # 1.7B
-  --outfile models/<name>.gguf --outtype q4_k_m  # 7-8B
+### Phase 2: Provenance (next — highest ROI)
+Embed `_metadata` block in every output JSON. Each file becomes self-describing:
+```json
+{
+  "_metadata": {
+    "schema_version": "2.0",
+    "run": { "id": "v128-20260613-fix2", "status": "completed", "started_at": "...", "duration_seconds": 19560 },
+    "model": { "name": "...", "hf_repo": "...", "hf_commit": "abc123" },
+    "inference": { "backend": "vllm", "backend_version": "0.22.1", "quantization": "fp8", "params": {...} },
+    "code": { "version": "92d23ca", "dirty": false },
+    "hardware": { "gpu_name": "RTX 5090", "vram_gb": 32 },
+    "dataset": { "source": "openai/miniF2F", "theorems": 488 },
+    "output": { "raw_size_bytes": ..., "extraction_rate": 0.77, "encoding": {...} }
+  },
+  "models": { ... }
+}
+```
+
+### Phase 3: Configuration-as-Code
+Extract `models.rs` hardcoded configs into `configs/models/<name>.yaml`:
+- Change params without recompiling
+- Three-layer merge: defaults ← hardware overrides ← model spec
+- SHA256 hash of config file recorded in provenance
+
+### Phase 4: Structured Errors + Logging
+- Typed error hierarchy: `Environment` | `Transient` | `DataError` | `ModelError`
+- Each with explicit recovery strategy
+- JSON-line structured log: `results/logs/<run_id>.jsonl`
+
+### Phase 5: CI/CD
+- `.github/workflows/quality.yml`: fmt + clippy + test on push
+- `.github/workflows/smoke.yml`: single-theorem smoke test on PR (GPU runner)
+
+### Phase 6: Backend Trait
+- `InferenceBackend` trait: `start()` → `generate()` → `stop()`
+- Two implementations: `VllmBackend`, `HfGenerateBackend`
+- Pipeline orchestration unaware of backend details
+
+### Target Directory Structure
+```
+project/
+├── configs/models/           # One YAML per model (Phase 3)
+├── configs/prompts/          # Prompt templates (Phase 3)
+├── src/backend/              # InferenceBackend trait + impls (Phase 6)
+├── src/provenance/           # Metadata generation (Phase 2)
+├── src/logging/              # Structured logging (Phase 4)
+├── output/provenance/        # Per-run metadata
+├── results/logs/             # Structured log files
+├── results/reports/          # Auto-generated validation reports
+├── .github/workflows/        # CI/CD (Phase 5)
+└── tests/integration/        # Integration tests (Phase 5)
+```
+
+### Development Workflow (target state)
+```
+git push → CI (fmt+clippy+test)
+  → PR merge
+  → pre-generate hooks
+  → run pipeline
+  → auto-verify each model
+  → provenance written
+  → report generated
+  → output artifacts ready
 ```

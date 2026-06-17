@@ -18,6 +18,7 @@ Load when the current task touches these areas.
 Only load when specifically referenced.
 
 - [[06-decisions]]     — ADR: vLLM vs HF generate, continuous request pool, byte-fallback decoder, STP decision
+- [[07-blueprint]]     — Future architecture: provenance, config YAML, errors, logging, backend trait, CI/CD
 
 ## External Documentation
 
