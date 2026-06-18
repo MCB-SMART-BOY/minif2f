@@ -26,16 +26,18 @@ metadata:
 | kimina-prover-rl-1.7b | 64 | Qwen3-1.7B, 3.4GB + GQA, light model |
 | goedel-prover-v2-8b | 16 | Qwen3-8B, 16GB + long ctx (32768), CoT |
 
-## vLLM Flags
+## vLLM Flags (actual invocation in `src/inference.rs`)
 ```
---quantization fp8
---max-model-len <per_seq>
---max-num-seqs <parallel>
---gpu-memory-utilization 0.92
---enforce-eager
---dtype half
---trust-remote-code
+uv run python -m vllm.entrypoints.openai.api_server \
+  --model <path> --port <port> \
+  --max-model-len <per_seq> --max-num-seqs <parallel> \
+  --gpu-memory-utilization 0.92 --dtype half --trust-remote-code \
+  --quantization fp8 --tokenizer-mode slow \
+  --disable-custom-all-reduce --disable-log-stats
 ```
+Env: `CUDA_HOME=<cu13>`, `VLLM_USE_FLASHINFER_SAMPLER=0`, `VLLM_ATTENTION_BACKEND=FLASH_ATTN`, `OMP_NUM_THREADS=""`.
+
+Health check: GET `/health`, timeout 5 min. Stderr → `/tmp/vllm-server-{port}.log`.
 
 ## vLLM PagedAttention
 KV cache is dynamically managed via PagedAttention — more efficient than static slot allocation. `--max-num-seqs` uses continuous batching to eliminate idle slot waste.

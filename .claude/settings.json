@@ -41,6 +41,12 @@
   "hooks": {
     "PreCommit": [
       "bash .claude/hooks/quality.sh"
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash(cargo build:*)",
+        "hooks": ["bash .claude/hooks/quality.sh"]
+      }
     ]
   }
 }

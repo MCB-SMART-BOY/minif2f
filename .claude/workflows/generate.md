@@ -2,47 +2,71 @@
 
 Triggers: "跑pipeline" "生成证明" "重跑" "generate" "开始跑" "续跑"
 
-Full 8-step lifecycle. See [[07-blueprint]] for the complete architecture.
+Full 8-step lifecycle. See [[07-blueprint]] for complete architecture.
+Encounter problems? → [[workflows/debug]]
 
-## Phase 0: Preflight
-- GPU free: `nvidia-smi --query-gpu=memory.used --format=csv,noheader`
-- Port 8080 free: `! fuser 8080/tcp 2>/dev/null`
-- Release current: `cargo build --release`
-- No orphans: `! pgrep -f "vllm.entrypoints"`
-- Model dirs exist: check each in generate-all.sh MODELS
-- Run: `bash .claude/hooks/pre-generate.sh`
+## Preconditions (all must pass before execution)
+
+- [ ] GPU free: `<500 MiB used`
+- [ ] Port 8080 free: `! fuser 8080/tcp`
+- [ ] Release binary current: `cargo build --release`
+- [ ] No orphan vLLM: `! pgrep -f vllm.entrypoints`
+- [ ] Model directories exist for all planned models
+- [ ] `bash .claude/hooks/pre-generate.sh` passes
+
+**Any failure → report + ask user: force / fix / cancel**
 
 ## Phase 1: Plan
-1. Determine scope — all models / specific
-2. Per model: read checkpoint → SKIP(488) / RESUME(N) / NEW
-3. STP excluded — runs separately via `python scripts/stp_runner.py`
-4. Set RUN_ID_PREFIX — reuse for resume, new `v128-YYYYMMDD-fix2` otherwise
-5. Display plan: ordered list + status + estimated time + total ETA
-6. Confirm with user
+
+1. Determine scope: user says "all" → read generate-all.sh MODELS; says "model name" → single
+2. Per model: read `results/checkpoints/<model>__<run_id>.json`
+   - File missing → NEW run
+   - Has 488 theorems → SKIP (already done)
+   - Has N < 488 → RESUME from N
+3. Exclude STP — runs via separate `python scripts/stp_runner.py` (see [[workflows/stp]])
+4. Set RUN_ID_PREFIX:
+   - Resume → reuse existing prefix (critical for checkpoint match)
+   - New → `v128-$(date +%Y%m%d)-fix2`
+5. Display plan table: model name | status | theorems to do | estimated time
+6. Wait for user confirmation → "继续？[Y/n]"
 
 ## Phase 2: Execute
+
 1. `tmux new-session -d -s minif2f-gen -c $(pwd)`
 2. Send: `export ATTEMPTS=128 RUN_ID_PREFIX='...'; bash /tmp/minif2f-worker.sh ...`
-3. Wait vLLM ready: poll `/health` every 2s, timeout 300s
-4. Wait first theorem done
-5. Sample 3 raw_output — no U+FFFD/Cyrillic
-6. Confirm GPU >90%
-7. Report status and detach
+3. Verify RUN_ID_PREFIX was inherited (check tmux output: `--run-id v128-...-fix2-<model>`)
+4. Wait vLLM ready: `curl --noproxy '*' localhost:8080/health` every 2s, timeout 300s
+5. Wait first theorem checkpointed (file appears or grows)
+6. Sample 3 raw_output entries → verify no U+FFFD/Cyrillic
+7. Confirm GPU >90% utilization via nvidia-smi
+8. Report: "✅ Pipeline running — `tmux attach -t minif2f-gen` to watch"
 
 ## Phase 3: Verify (per model, after completion)
-1. Structure: JSON valid, 488 theorems, 128 attempts each
-2. Encoding: per-architecture thresholds (Qwen3: U+FFFD=0, Llama: <1%)
-3. Quality: non-empty rate, extraction rate, file sizes
-4. Sampling: 5 theorems × 5 attempts — basic Lean validity
-5. Result: PASS → next | WARN → note + continue | ERROR → report + ask
+
 Run: `bash .claude/hooks/verify-output.sh <model>`
 
+Check levels:
+1. **Structure**: JSON valid, exactly 488 theorems, exactly 128 attempts each
+2. **Encoding**: Qwen3 → U+FFFD=0, Cyrillic=0 | LLaMA → U+FFFD<1%, Cyrillic=0, Latin-1 recorded
+3. **Quality**: non-empty rate >95%, extraction rate reported, file sizes normal
+4. **Sampling**: 25 random entries → basic Lean validity check
+
+Result classification:
+- **PASS** → next model or COMPLETE
+- **WARN** → note issue, continue to next model, fix later
+- **ERROR** → pause, report to user, ask: continue / fix / skip
+- **FATAL** → stop pipeline, mark run failed
+
+See [[workflows/debug]] for diagnosing verification failures.
+
 ## Recovery Paths
-| Failure | Action |
-|---------|--------|
-| Shutdown mid-run | Restart same RUN_ID_PREFIX — checkpoint auto-resumes |
-| vLLM OOM | Reduce parallel in MODELS array — restart same run_id |
-| Model load fail | Check HF_TOKEN, disk space, model files |
-| Encoding corruption | Complete pipeline — post-processing script |
-| 0% extraction | Sample raw → diagnose → fix code → re-run |
-| Verification ERROR | Report to user — decide: continue / fix / skip |
+
+| Failure | When | Recovery |
+|---------|------|----------|
+| Machine shutdown | Any time | Restart with same `RUN_ID_PREFIX` → checkpoint auto-resumes |
+| vLLM OOM / crash | Mid-model | Reduce `--parallel` → restart same `RUN_ID_PREFIX` |
+| Model load failure | Backend start | Check HF_TOKEN, disk space, model files exist |
+| Encoding corruption found | Phase 3 verify | Complete pipeline → post-processing → see [[workflows/debug]] |
+| 0% extraction rate | Phase 3 verify | Sample raw_output → diagnose → fix code → re-run model |
+| Verification ERROR | Phase 3 verify | Report to user → decide: continue / fix-code / skip-model |
+| tmux session killed | Mid-model | Worker continues? If yes → done. If no → checkpoint resume. |

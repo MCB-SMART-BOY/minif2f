@@ -1,5 +1,15 @@
 # Project Knowledge Index
 
+## Quick Reference — Common Intents
+
+| User says | → Trigger workflow | → Key commands |
+|-----------|-------------------|----------------|
+| "跑pipeline" "生成证明" | [[workflows/generate]] | `bash scripts/generate-all.sh` |
+| "看进度" "速度" | [[workflows/status]] | `tmux capture-pane -t minif2f-gen -p` |
+| "乱码" "空输出" "检查质量" | [[workflows/debug]] | `bash .claude/hooks/verify-output.sh <model>` |
+| "修改" "修复代码" | [[workflows/code-change]] | `bash .claude/hooks/quality.sh` |
+| "跑STP" | [[workflows/stp]] | `python scripts/stp_runner.py` |
+
 ## Always-Load (🔴 session-critical)
 These define the project and must be loaded at the start of every session.
 
