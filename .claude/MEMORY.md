@@ -17,6 +17,18 @@ These define the project and must be loaded at the start of every session.
 - [[01-architecture]] — Code structure: file map, data flow, module dependencies
 - [[02-models]]       — 6-model registry: official specs, prompt formats, sampling params, EOS tokens, HF URLs, paper citations
 
+## ⚠️ Active Findings (fixes applied 2026-06-21; reruns pending pipeline completion)
+
+- [[decoder-gpt2-bytefallback-bug]] — 🔴 ROOT CAUSE. FIXED in inference.rs (GPT-2 bytes_to_unicode inverse table replaces cp-0x100). Corrupted LLaMA raw is IRREVERSIBLE → goedel-dpo + deepseek-v2 MUST rerun with fixed binary after goedel-v2 finishes.
+- [[extraction-double-header-bug]] — FIXED in pipeline.rs (assemble_and_validate shared fn). qwen3 recovered offline via `re-extract` subcommand: kimina-rl + kimina-distill re-extracted 2026-06-21, double-headers 1832→0 / 449→0, ZERO genuine regressions. goedel-v2 re-extract pending its run completion.
+- [[stp-runner-walrus-bug]]        — FIXED in stp_runner.py (`pos = find(); if pos != -1`) + per-batch torch.manual_seed. STP still not run — run after GPU frees.
+- [[checkpoint-data-loss-window]]  — ✅ FIXED 2026-06-21. mark_done moved out of flush_batch → after write_flat_json (data durable before checkpoint). Test test_checkpoint_never_ahead_of_data. Takes effect on NEXT run (rerun dpo/deepseek), not the live goedel-v2 (old binary).
+- [[extract-problem-desc-newline-bug]] — 🟡 OPEN. ends_with("-/") never matches (data ends "-/\n") → /-- -/ leaks into kimina # Problem: line. Mild; fix = trim_end first.
+
+## ✅ Tooling added 2026-06-21
+- `re-extract` CLI subcommand (main.rs) + `pipeline::re_extract_model` + `assemble_and_validate` (shared by generate & re-extract, no drift). `scripts/re-extract.sh` repaired (was calling a nonexistent subcommand). Zero-GPU lean_code recovery from clean raw_output (qwen3 only).
+- ✅ `run` + `setup.sh` migrated to vLLM/safetensors stack (2026-06-21): `run` uses `data/models/<name>/` + per-model `--parallel` + STP→stp_runner.py routing + re-extract menu option; `setup.sh` provisions `tools/vllm` via `uv sync` + downloads safetensors (no GGUF). Dead weight still on disk (~31 GB: `models/*.gguf`, `tools/llama.cpp`, `tools/venv`, `tools/download_model.sh`) — safe to delete, awaiting user OK.
+
 ## On-Demand (🟡 task-specific)
 Load when the current task touches these areas.
 
