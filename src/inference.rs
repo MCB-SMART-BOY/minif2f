@@ -212,34 +212,69 @@ impl Drop for InferenceEngine {
     }
 }
 
-/// Decode LLaMA byte-fallback encoding from vLLM's output.
+/// Reverse GPT-2 ByteLevel encoding from vLLM's output.
 ///
-/// LLaMA tokenizer encodes raw bytes 0x00–0xFF as Unicode characters in the
-/// U+0100–U+01FF range (byte + 0x0100).  vLLM 0.22.1 handles most of this
-/// internally, but a small number of tokens may still leak through.  This
-/// function reverses those remaining fallback characters.
+/// DeepSeek/Goedel "LLaMA-based" tokenizers are actually GPT-2 **ByteLevel BPE**
+/// (`tokenizer.json`: `model.type = BPE`, `decoder.type = ByteLevel`,
+/// `byte_fallback = false`, vocab uses `Ġ`/`â`).  Their vocabulary maps each raw
+/// byte 0x00–0xFF to a printable Unicode char via the GPT-2 `bytes_to_unicode`
+/// table — which is NOT a flat `byte + 0x0100` offset.  When vLLM runs with
+/// `--tokenizer-mode slow`, the ByteLevel decoder is bypassed and these encoded
+/// chars (e.g. `âĦ¤` for `ℤ`) leak into the completion text.  This function
+/// reverses them with the correct inverse table.
 ///
-/// **IMPORTANT**: Latin-1 characters (U+0080–U+00FF) are NOT decoded back to
-/// raw bytes.  They are valid Unicode (e.g. `é` in "José") and converting
-/// them would corrupt adjacent characters by forming spurious multi-byte
-/// UTF-8 sequences from unrelated Latin-1 bytes.  vLLM's built-in tokenizer
-/// already handles the LLaMA tokenizer's Latin-1 output correctly.
+/// The previous implementation used `byte = codepoint - 0x100`, which only
+/// agrees with the GPT-2 table on ASCII and mis-decodes 35 continuation bytes
+/// (e.g. `Ħ`/U+0126 → 0x26 `&` instead of 0x84), shredding multi-byte math
+/// symbols like ℤ/ℕ/ℝ.  See `.claude/memory/05c-decoder-bug.md`.
+///
+/// Only chars present in the GPT-2 byte table are mapped back to bytes; any
+/// other char (already-correct UTF-8, e.g. a literal space, newline, or a math
+/// symbol vLLM detokenized correctly) passes through unchanged.
 fn decode_llama_byte_fallback(text: &str) -> String {
+    let table = gpt2_unicode_to_byte();
     let mut bytes: Vec<u8> = Vec::with_capacity(text.len());
     for ch in text.chars() {
-        let cp = ch as u32;
-        match cp {
-            // Only decode the explicit byte-fallback range.
-            // Latin-1 (0x0080..=0x00FF) passes through as valid UTF-8.
-            0x0100..=0x01FF => bytes.push((cp - 0x0100) as u8),
-            _ => {
-                let mut buf = [0u8; 4];
-                let len = ch.encode_utf8(&mut buf).len();
-                bytes.extend_from_slice(&buf[..len]);
-            }
+        if let Some(&b) = table.get(&ch) {
+            bytes.push(b);
+        } else {
+            let mut buf = [0u8; 4];
+            let len = ch.encode_utf8(&mut buf).len();
+            bytes.extend_from_slice(&buf[..len]);
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Build the GPT-2 `bytes_to_unicode` inverse map (printable char → raw byte).
+///
+/// Mirrors the canonical GPT-2/RoBERTa implementation: the 188 "printable"
+/// bytes map to themselves, and the remaining 68 bytes map to U+0100, U+0101, …
+/// in order.  Inverting gives char → byte.
+fn gpt2_unicode_to_byte() -> std::collections::HashMap<char, u8> {
+    // The printable byte ranges that map to their own codepoint.
+    let mut bs: Vec<u32> = Vec::new();
+    bs.extend(0x21..=0x7E); // '!'..='~'
+    bs.extend(0xA1..=0xAC); // '¡'..='¬'
+    bs.extend(0xAE..=0xFF); // '®'..='ÿ'
+
+    let mut map = std::collections::HashMap::with_capacity(256);
+    let mut n: u32 = 0;
+    for b in 0u32..256 {
+        if bs.contains(&b) {
+            // byte maps to the char with the same codepoint
+            if let Some(c) = char::from_u32(b) {
+                map.insert(c, b as u8);
+            }
+        } else {
+            // byte maps to U+0100 + n
+            if let Some(c) = char::from_u32(0x100 + n) {
+                map.insert(c, b as u8);
+            }
+            n += 1;
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -289,90 +324,84 @@ mod tests {
         assert!(decoded.contains('\u{2115}'));
     }
 
-    // ── Latin-1 preservation tests (the key fix) ────────────────────────
+    // ── ByteLevel round-trip tests (the key fix) ───────────────────────
+    //
+    // DeepSeek/Goedel tokenizers are GPT-2 ByteLevel BPE.  Multi-byte UTF-8
+    // is encoded byte-by-byte into printable chars; the decoder must reverse
+    // the GPT-2 `bytes_to_unicode` table, NOT a flat `cp - 0x100`.
 
     #[test]
-    fn test_latin1_preserved_not_decoded() {
-        // Latin-1 characters are valid Unicode — they must pass through,
-        // NOT be converted back to raw bytes.  Converting them causes
-        // adjacent Latin-1 chars to combine into spurious multi-byte
-        // UTF-8 sequences (e.g. U+00D0 + U+00B4 → 0xD0 0xB4 → 'д').
-        let input = "Jos\u{00E9}"; // José
+    fn test_recovers_blackboard_z() {
+        // ℤ (U+2124, utf-8 E2 84 A4) → GPT-2 byte-encoded "âĦ¤"
+        //   â=U+00E2→0xE2, Ħ=U+0126→0x84, ¤=U+00A4→0xA4
+        let input = "\u{00E2}\u{0126}\u{00A4}"; // âĦ¤
         let decoded = decode_llama_byte_fallback(input);
-        assert_eq!(decoded, "Jos\u{00E9}");
+        assert_eq!(decoded, "\u{2124}"); // ℤ
         assert!(!decoded.contains('\u{FFFD}'));
     }
 
     #[test]
-    fn test_latin1_no_spurious_cyrillic() {
-        // U+00D0 (Ð) + U+00B4 (´) → if decoded as raw bytes:
-        //   0xD0 + 0xB4 = UTF-8 for 'д' (Cyrillic)
-        // After fix: both pass through as valid Latin-1
-        let input = "\u{00D0}\u{00B4}";
+    fn test_recovers_math_symbols_in_context() {
+        // "(n : ℤ)" byte-encoded. '(' 'n' ' '(Ġ) ':' ' '(Ġ) âĦ¤ ')'
+        let input = "(n\u{0120}:\u{0120}\u{00E2}\u{0126}\u{00A4})";
         let decoded = decode_llama_byte_fallback(input);
-        assert_eq!(decoded, "\u{00D0}\u{00B4}");
-        assert!(!decoded.contains('\u{0434}')); // NOT Cyrillic 'д'
-        assert!(!decoded.contains('\u{FFFD}'));
+        assert_eq!(decoded, "(n : \u{2124})");
     }
 
     #[test]
-    fn test_latin1_no_spurious_replacement_char() {
-        // U+00E2 (â) alone → if decoded as 0xE2 (UTF-8 continuation byte):
-        //   from_utf8_lossy would produce U+FFFD (orphan byte)
-        // After fix: passes through unchanged
-        let input = "\u{00E2}";
+    fn test_recovers_right_single_quote() {
+        // U+2019 (’) utf-8 = E2 80 99 → byte-encoded "âĢĻ"
+        //   â=0xE2, Ģ=U+0122→0x80, Ļ=U+013B→0x99
+        let input = "\u{00E2}\u{0122}\u{013B}";
         let decoded = decode_llama_byte_fallback(input);
-        assert_eq!(decoded, "\u{00E2}");
-        assert!(!decoded.contains('\u{FFFD}'));
+        assert_eq!(decoded, "\u{2019}");
     }
 
     #[test]
-    fn test_latin1_replacement_char_still_present_for_real_corruption() {
-        // U+FFFD that was already in the input should still be there
+    fn test_byte_encoded_accented_letter_round_trips() {
+        // A real é (U+00E9, utf-8 C3 A9) is byte-encoded as "Ã©"
+        //   Ã=U+00C3→0xC3, ©=U+00A9→0xA9
+        let input = "Jos\u{00C3}\u{00A9}"; // "JosÃ©"
+        let decoded = decode_llama_byte_fallback(input);
+        assert_eq!(decoded, "Jos\u{00E9}"); // José
+    }
+
+    #[test]
+    fn test_decode_valid_utf8_passes_through() {
+        // Chars NOT in the GPT-2 byte table (e.g. ℕ U+2115, already-correct
+        // UTF-8 that vLLM detokenized properly) pass through unchanged.
+        let input = "theorem foo : \u{2115}";
+        let decoded = decode_llama_byte_fallback(input);
+        assert!(decoded.contains('\u{2115}'));
+    }
+
+    #[test]
+    fn test_real_corruption_marker_preserved() {
+        // U+FFFD already in input is not in the table → passes through.
         let input = "bad \u{FFFD} char";
         let decoded = decode_llama_byte_fallback(input);
         assert!(decoded.contains('\u{FFFD}'));
     }
 
     #[test]
-    fn test_latin1_full_spanish_word() {
-        // Real-world: Spanish/Portuguese names in theorem descriptions
-        let input = "Jos\u{00E9} Carlos G\u{00F3}mez";
+    fn test_space_and_newline_pass_through() {
+        // A literal space/newline (vLLM already detokenized) are NOT in the
+        // GPT-2 table (which has Ġ/Ċ for those bytes) → must pass through.
+        let input = "rw [h]\n  rfl";
         let decoded = decode_llama_byte_fallback(input);
-        assert_eq!(decoded, "Jos\u{00E9} Carlos G\u{00F3}mez");
-    }
-
-    // ── Mixed Latin-1 + byte-fallback ──────────────────────────────────
-
-    #[test]
-    fn test_mixed_latin1_and_byte_fallback() {
-        // Latin-1 é (U+00E9) + byte-fallback space (U+0120) + text
-        let input = "resum\u{00E9}\u{0120}proof";
-        let decoded = decode_llama_byte_fallback(input);
-        assert_eq!(decoded, "resum\u{00E9} proof");
-    }
-
-    // ── Real corruption scenarios from goedel-prover-dpo ────────────────
-
-    #[test]
-    fn test_dpo_style_corruption_prevented() {
-        // Simulates: "h" + U+00D0 + U+00B4 + "$"
-        // Old code: 0xD0+0xB4 → 'д', producing "hд$"
-        // New code: preserves Latin-1, producing "hÐ´$"
-        let input = "h\u{00D0}\u{00B4}$";
-        let decoded = decode_llama_byte_fallback(input);
-        assert_eq!(decoded, "h\u{00D0}\u{00B4}$");
-        assert!(!decoded.contains('\u{0434}')); // no Cyrillic
-    }
-
-    #[test]
-    fn test_multiple_latin1_sequence_preserved() {
-        // A string of consecutive Latin-1 bytes — all must pass through
-        let input = "\u{00E2}\u{0080}\u{0099}\u{00E2}\u{0080}\u{0099}";
-        let decoded = decode_llama_byte_fallback(input);
-        // Should be identical (no re-interpretation)
         assert_eq!(decoded, input);
-        assert!(!decoded.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_gpt2_table_is_bijective_over_256_bytes() {
+        // Every one of the 256 byte values must have exactly one char.
+        let table = gpt2_unicode_to_byte();
+        assert_eq!(table.len(), 256);
+        let mut seen = [false; 256];
+        for (_, &b) in &table {
+            seen[b as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "table must cover all 256 bytes");
     }
 
     #[test]
