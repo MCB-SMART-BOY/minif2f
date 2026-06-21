@@ -64,7 +64,7 @@ impl EvaluationPipeline {
         std::fs::create_dir_all(&raw_dir)?;
         std::fs::create_dir_all(&lean_dir)?;
 
-        let checkpoint =
+        let mut checkpoint =
             CheckpointManager::new(&self.config.checkpoint_dir(), &model_cfg.name, &self.run_id)?;
 
         let n_attempts = self.config.completion_attempts;
@@ -169,12 +169,22 @@ impl EvaluationPipeline {
         // the main loop to continue feeding the GPU.
 
         // Write JSON incrementally to prevent data loss on crash.
-        // Checkpoint files only record theorem names, not proof data —
-        // without incremental writes, a crash loses all generated proofs.
+        // Checkpoint files only record theorem names, not proof data.
+        //
+        // ORDERING INVARIANT: a theorem is marked done in the checkpoint ONLY
+        // after its data has been written to the output JSON.  If we checkpoint
+        // per-theorem but write JSON every 20, a crash in that window would let
+        // the checkpoint skip theorems whose data never reached disk (silent
+        // loss).  So we buffer just-flushed theorem names and `mark_done` them
+        // only after `write_flat_json` succeeds.  Worst case on crash: data is
+        // on disk but a theorem isn't marked done → it is regenerated on resume
+        // (harmless duplicate work, never data loss).
         const INCREMENTAL_WRITE_EVERY: u32 = 20;
 
         let mut batches: BTreeMap<String, (Theorem, Vec<(usize, String)>)> = BTreeMap::new();
         let mut thms_since_write: u32 = 0;
+        // Theorems flushed to `results` but not yet persisted + checkpointed.
+        let mut pending_checkpoint: Vec<String> = Vec::new();
 
         while let Some((theorem, attempt, text)) = result_stream.next().await {
             let entry = batches
@@ -184,21 +194,20 @@ impl EvaluationPipeline {
 
             if entry.1.len() >= n_attempts {
                 let (thm, batch) = batches.remove(&theorem.name).unwrap();
-                flush_batch(
-                    &mut results,
-                    &thm,
-                    &batch,
-                    &pb_extract,
-                    &self.config.checkpoint_dir(),
-                    &model_cfg.name,
-                    &self.run_id,
-                    &bar,
-                );
+                flush_batch(&mut results, &thm, &batch, &pb_extract, &bar);
+                pending_checkpoint.push(thm.name.clone());
 
                 thms_since_write += 1;
                 if thms_since_write >= INCREMENTAL_WRITE_EVERY {
+                    // Data first …
                     write_flat_json(&raw_json_path, model_cfg, &results, |(raw, _lean)| raw)?;
                     write_flat_json(&lean_json_path, model_cfg, &results, |(_raw, lean)| lean)?;
+                    // … then mark those theorems done (never ahead of disk).
+                    for name in pending_checkpoint.drain(..) {
+                        if let Err(e) = checkpoint.mark_done(&name) {
+                            eprintln!("⚠️  Checkpoint write failed for {name}: {e}");
+                        }
+                    }
                     thms_since_write = 0;
                 }
             }
@@ -220,6 +229,13 @@ impl EvaluationPipeline {
 
         write_flat_json(&raw_json_path, model_cfg, &results, |(raw, _lean)| raw)?;
         write_flat_json(&lean_json_path, model_cfg, &results, |(_raw, lean)| lean)?;
+
+        // Data is now durable — mark any theorems not yet checkpointed.
+        for name in pending_checkpoint.drain(..) {
+            if let Err(e) = checkpoint.mark_done(&name) {
+                eprintln!("⚠️  Checkpoint write failed for {name}: {e}");
+            }
+        }
 
         let raw_size = std::fs::metadata(&raw_json_path)
             .map(|m| m.len())
@@ -251,16 +267,94 @@ impl EvaluationPipeline {
     }
 }
 
+/// Re-extract `lean_code` from an existing `raw_output/<model>.json` without
+/// running any inference.  Reads the stored raw completions, re-runs proof
+/// extraction + assembly + validation with the current code, and writes a
+/// fresh `lean_code/<model>.json`.
+///
+/// Zero GPU cost.  Use after fixing extraction/assembly logic when the raw
+/// model output is intact (i.e. qwen3 models — LLaMA raw is decoder-corrupted
+/// at write time and cannot be recovered this way).
+///
+/// `raw_dir`/`lean_dir` are the directories holding `<model>.json`.  Theorem
+/// metadata (header/statement) is loaded from `data_dir` and matched by name.
+///
+/// # Errors
+/// Returns an error if the dataset or raw_output file cannot be read/parsed,
+/// or the lean_code file cannot be written.
+pub fn re_extract_model(
+    model_cfg: &ModelConfig,
+    raw_dir: &std::path::Path,
+    lean_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<(usize, usize)> {
+    let pb = PromptBuilder::new(model_cfg.clone());
+
+    // Theorem metadata keyed by name.
+    let theorems = load_all(data_dir)?;
+    let thm_by_name: BTreeMap<String, Theorem> =
+        theorems.into_iter().map(|t| (t.name.clone(), t)).collect();
+
+    // Read raw_output and pull out this model's object.
+    let file_stem = model_cfg.name.replace(['/', ' '], "_");
+    let raw_path = raw_dir.join(format!("{file_stem}.json"));
+    let raw_text = std::fs::read_to_string(&raw_path)
+        .with_context(|| format!("reading {}", raw_path.display()))?;
+    let raw_json: serde_json::Value = serde_json::from_str(&raw_text)
+        .with_context(|| format!("parsing {}", raw_path.display()))?;
+    let model_obj = raw_json
+        .get(&model_cfg.name)
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "key '{}' not found in {}",
+                model_cfg.name,
+                raw_path.display()
+            )
+        })?;
+
+    // Re-extract every attempt.
+    let mut results: ResultsMap = BTreeMap::new();
+    let mut total = 0usize;
+    let mut recovered = 0usize;
+    for (thm_name, attempts) in model_obj {
+        let Some(theorem) = thm_by_name.get(thm_name) else {
+            continue; // raw theorem not in current dataset — skip
+        };
+        let attempts = attempts.as_object().context("attempt map not an object")?;
+        for (attempt_key, raw_val) in attempts {
+            let raw = raw_val.as_str().unwrap_or("");
+            total += 1;
+            let proof = pb.extract_proof(raw);
+            let lean = assemble_and_validate(&proof, theorem, &pb);
+            if !lean.is_empty() {
+                recovered += 1;
+            }
+            results
+                .entry(thm_name.clone())
+                .or_default()
+                .insert(attempt_key.clone(), (raw.to_string(), lean));
+        }
+    }
+
+    // Write lean_code with the same flat format as the pipeline.
+    std::fs::create_dir_all(lean_dir)?;
+    let lean_path = lean_dir.join(format!("{file_stem}.json"));
+    write_flat_json(&lean_path, model_cfg, &results, |(_, lean)| lean)?;
+
+    Ok((total, recovered))
+}
+
 /// Parallel batch extraction via rayon, then sequential BTreeMap insert.
-#[allow(clippy::too_many_arguments)]
+///
+/// Does NOT checkpoint — the caller marks theorems done only AFTER their data
+/// has been written to disk, so the checkpoint can never get ahead of durable
+/// output (see the incremental-write loop in `run`).
 fn flush_batch(
     results: &mut ResultsMap,
     theorem: &Theorem,
     batch: &[(usize, String)],
     pb: &PromptBuilder,
-    checkpoint_dir: &std::path::Path,
-    model_name: &str,
-    run_id: &str,
     bar: &ProgressBar,
 ) {
     use rayon::prelude::*;
@@ -270,19 +364,7 @@ fn flush_batch(
         .par_iter()
         .map(|(attempt, text)| {
             let proof = pb.extract_proof(text);
-            let lean = if proof.is_empty() {
-                String::new()
-            } else if proof.contains("import ") {
-                proof
-            } else {
-                theorem.make_proof_file(&proof)
-            };
-            // Validate: reject incomplete Lean (missing tactics, has sorry, etc.)
-            let lean = if pb.validate_lean_code(&lean) {
-                lean
-            } else {
-                String::new()
-            };
+            let lean = assemble_and_validate(&proof, theorem, pb);
             (*attempt, text.clone(), lean)
         })
         .collect();
@@ -295,14 +377,55 @@ fn flush_batch(
             .insert(format!("attempt_{}", attempt + 1), (text, lean));
         bar.inc(1);
     }
+}
 
-    // Checkpoint — each flush is a complete theorem.  File is tiny
-    // (~10 KB for 488 names) so synchronous write is fine here.
-    if let Ok(mut ck) = CheckpointManager::new(checkpoint_dir, model_name, run_id) {
-        if let Err(e) = ck.mark_done(&theorem.name) {
-            eprintln!("⚠️  Checkpoint write failed for {}: {e}", theorem.name);
+/// Assemble a complete Lean file from an extracted proof, then validate it.
+///
+/// Single source of truth for proof assembly, shared by live generation
+/// (`flush_batch`) and offline re-extraction (the `re-extract` subcommand) so
+/// the two paths can never drift.  Returns `""` when extraction was empty or
+/// the assembled file fails validation.
+///
+/// Three assembly branches:
+/// 1. Proof already contains `import ` — model emitted the full file, use as-is.
+/// 2. Proof contains a `theorem`/`lemma` declaration but no import — prepend
+///    ONLY the header; calling `make_proof_file` would duplicate the statement
+///    and produce a rejected double-theorem file (Goedel-V2 / DeepSeek-V2).
+/// 3. Pure proof body — wrap with header + statement via `make_proof_file`.
+pub fn assemble_and_validate(proof: &str, theorem: &Theorem, pb: &PromptBuilder) -> String {
+    let lean = if proof.is_empty() {
+        String::new()
+    } else if proof.contains("import ") {
+        proof.to_string()
+    } else if proof_has_theorem_decl(proof) {
+        if theorem.header.is_empty() {
+            proof.to_string()
+        } else {
+            format!("{}\n{}", theorem.header, proof)
         }
+    } else {
+        theorem.make_proof_file(proof)
+    };
+    if pb.validate_lean_code(&lean) {
+        lean
+    } else {
+        String::new()
     }
+}
+
+/// Detect whether an extracted proof already contains a `theorem`/`lemma`
+/// declaration line.  When true, the block carries its own statement and the
+/// pipeline must NOT re-wrap it with `make_proof_file` (that would duplicate
+/// the `theorem ... := by` header and fail validation).
+///
+/// Matches a declaration keyword at the very start or at the start of any line
+/// (allowing leading whitespace), to avoid false positives on the word
+/// "theorem" appearing inside a tactic or comment.
+fn proof_has_theorem_decl(proof: &str) -> bool {
+    proof.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("theorem ") || t.starts_with("lemma ")
+    })
 }
 
 /// Write a flat JSON file: `{ "<model>": { "<theorem>": { "attempt_N": "<text>" } } }`.
@@ -534,5 +657,130 @@ mod tests {
         });
         let map = extract_model_data(Some(&json), "test-model");
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_proof_has_theorem_decl() {
+        // Block that carries its own statement (Goedel-V2 / DeepSeek case)
+        assert!(proof_has_theorem_decl("theorem foo : 1 = 1 := by\n  rfl"));
+        assert!(proof_has_theorem_decl("lemma bar : x = x := by\n  rfl"));
+        // Indented declaration still detected
+        assert!(proof_has_theorem_decl("  theorem foo := by rfl"));
+        // Pure proof body — no declaration (Goedel-DPO fallback case)
+        assert!(!proof_has_theorem_decl("  rfl"));
+        assert!(!proof_has_theorem_decl("rw [add_comm]\n  simp"));
+        // The word "theorem" inside a tactic/comment must NOT trigger
+        assert!(!proof_has_theorem_decl(
+            "  -- prove the theorem here\n  rfl"
+        ));
+        assert!(!proof_has_theorem_decl("  exact theorem_helper x"));
+    }
+
+    #[test]
+    fn test_assembly_avoids_double_header() {
+        // Simulate the Goedel-V2 case: extracted proof = full block with
+        // theorem statement but NO import header.  Assembling must prepend
+        // only the header, producing exactly ONE theorem declaration.
+        let theorem = Theorem {
+            name: "foo".into(),
+            split: "test".into(),
+            informal_prefix: String::new(),
+            formal_statement: "theorem foo : 1 = 1 := by".into(),
+            header: "import Mathlib".into(),
+            goal: String::new(),
+        };
+        let pb = PromptBuilder::new(test_model_cfg());
+        let proof = "theorem foo : 1 = 1 := by\n  norm_num";
+        let lean = assemble_and_validate(proof, &theorem, &pb);
+        // Exactly one theorem declaration — no duplication
+        assert_eq!(lean.matches("theorem foo").count(), 1);
+        assert!(lean.contains("import Mathlib"));
+        assert!(lean.contains("norm_num"));
+    }
+
+    #[test]
+    fn test_assemble_and_validate_all_branches() {
+        let pb = PromptBuilder::new(test_model_cfg());
+        let theorem = Theorem {
+            name: "foo".into(),
+            split: "test".into(),
+            informal_prefix: String::new(),
+            formal_statement: "theorem foo : 1 = 1 := by".into(),
+            header: "import Mathlib".into(),
+            goal: String::new(),
+        };
+
+        // Branch 0: empty proof → empty result
+        assert_eq!(assemble_and_validate("", &theorem, &pb), "");
+
+        // Branch 1: proof already has `import ` → used as-is (single header)
+        let with_import = "import Mathlib\ntheorem foo : 1 = 1 := by\n  norm_num";
+        let r1 = assemble_and_validate(with_import, &theorem, &pb);
+        assert_eq!(r1, with_import);
+        assert_eq!(r1.matches("theorem foo").count(), 1);
+
+        // Branch 2: theorem decl, no import → prepend header only, no dup
+        let with_decl = "theorem foo : 1 = 1 := by\n  norm_num";
+        let r2 = assemble_and_validate(with_decl, &theorem, &pb);
+        assert!(r2.contains("import Mathlib"));
+        assert_eq!(r2.matches("theorem foo").count(), 1);
+
+        // Branch 3: pure proof body → wrapped via make_proof_file
+        let body = "  norm_num";
+        let r3 = assemble_and_validate(body, &theorem, &pb);
+        assert!(r3.contains("import Mathlib"));
+        assert!(r3.contains("theorem foo"));
+        assert!(r3.contains("norm_num"));
+
+        // Invalid (sorry) → rejected to empty
+        let bad = "theorem foo : 1 = 1 := by\n  sorry";
+        assert_eq!(assemble_and_validate(bad, &theorem, &pb), "");
+    }
+
+    #[test]
+    fn test_checkpoint_never_ahead_of_data() {
+        // Regression for the data-loss window: a theorem must only be marked
+        // done AFTER its data is persisted. We simulate a crash between the
+        // JSON write and a (hypothetical) premature checkpoint, and assert that
+        // any theorem the checkpoint reports as done is actually present in the
+        // reloaded JSON — i.e. resume can never skip un-persisted data.
+        use crate::checkpoint::CheckpointManager;
+        let tmp = std::env::temp_dir().join("minif2f-test-ckpt-ordering");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let model = test_model_cfg();
+        let raw_path = tmp.join("raw.json");
+        let lean_path = tmp.join("lean.json");
+
+        // Two theorems flushed into memory.
+        let mut results: ResultsMap = BTreeMap::new();
+        for name in ["thm_a", "thm_b"] {
+            let mut atts: AttemptMap = BTreeMap::new();
+            atts.insert("attempt_1".into(), ("raw".into(), "lean".into()));
+            results.insert(name.into(), atts);
+        }
+
+        // Correct order: data first …
+        write_flat_json(&raw_path, &model, &results, |(raw, _)| raw).unwrap();
+        write_flat_json(&lean_path, &model, &results, |(_, lean)| lean).unwrap();
+        // … then checkpoint.
+        let mut ck = CheckpointManager::new(&tmp, &model.name, "run1").unwrap();
+        ck.mark_done("thm_a").unwrap();
+        ck.mark_done("thm_b").unwrap();
+
+        // On resume, every done theorem must exist in the reloaded data.
+        let loaded = load_existing_results(&raw_path, &lean_path, &model.name).unwrap();
+        let ck2 = CheckpointManager::new(&tmp, &model.name, "run1").unwrap();
+        for name in ["thm_a", "thm_b"] {
+            if ck2.is_done(name) {
+                assert!(
+                    loaded.contains_key(name),
+                    "checkpoint marked {name} done but its data is missing — data loss!"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

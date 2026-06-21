@@ -54,6 +54,18 @@ enum Commands {
         #[arg(long, default_value = "default")]
         run_id: String,
     },
+    /// Re-extract lean_code from existing raw_output (no GPU / no inference)
+    ReExtract {
+        /// Model name
+        #[arg(short, long)]
+        model: String,
+        /// Directory holding raw_output/<model>.json
+        #[arg(long, default_value = "output/raw_output")]
+        raw_dir: String,
+        /// Directory to write lean_code/<model>.json
+        #[arg(long, default_value = "output/lean_code")]
+        lean_dir: String,
+    },
 }
 
 #[tokio::main]
@@ -120,6 +132,35 @@ async fn main() -> anyhow::Result<()> {
                     Err(_) => println!("  {model_name}: no checkpoint"),
                 }
             }
+        }
+        Commands::ReExtract {
+            model,
+            raw_dir,
+            lean_dir,
+        } => {
+            let model_cfg = find_model(&model).ok_or_else(|| {
+                anyhow::anyhow!("Model '{model}' not found. Use 'list-models' to see available.")
+            })?;
+
+            println!("=== Re-extracting lean_code (no GPU) ===");
+            println!("Model: {} ({})", model_cfg.name, model_cfg.architecture);
+            println!("Raw input:  {raw_dir}/{model}.json");
+            println!("Lean output: {lean_dir}/{model}.json");
+
+            let (total, recovered) = minif2f_lib::pipeline::re_extract_model(
+                &model_cfg,
+                &PathBuf::from(&raw_dir),
+                &PathBuf::from(&lean_dir),
+                &PathBuf::from("data"),
+            )?;
+
+            let rate = if total > 0 {
+                recovered as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            println!("\n✅ Re-extracted {total} attempts");
+            println!("   Non-empty lean_code: {recovered} ({rate:.1}%)");
         }
     }
 
