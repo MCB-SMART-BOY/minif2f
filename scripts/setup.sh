@@ -5,23 +5,24 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 # ── Config ────────────────────────────────────────────────────────────
-LLAMA_CPP_REPO="https://github.com/ggml-org/llama.cpp.git"
 MINIF2F_URL="https://raw.githubusercontent.com/openai/miniF2F/main/minif2f.jsonl"
-HF_TOKEN="${HF_TOKEN:-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}"
+HF_TOKEN="${HF_TOKEN:-}"
 HF_HOME="${HF_HOME:-$PWD/data/models}"
 # Default to huggingface.co (works with proxy). Use hf-mirror.com if no proxy.
 HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
+VLLM_DIR="tools/vllm"
 
-# ── Model download URLs (HuggingFace) ─────────────────────────────────
-# Format: "name|repo|outfile|outtype"
-# outtype: f16 for ≤3B, q4_k_m for 7-8B
+# ── Model download (HuggingFace safetensors → data/models/<name>/) ────
+# vLLM loads the safetensors DIRECTORY directly with --quantization fp8 at
+# load time. No GGUF conversion, no quantization step.
+# Format: "name|repo"
 MODEL_LIST=(
-  "goedel-prover-dpo|Goedel-LM/Goedel-Prover-DPO|models/goedel-prover-dpo.gguf|q4_k_m"
-  "kimina-prover-rl-1.7b|AI-MO/Kimina-Prover-RL-1.7B|models/kimina-1.7b.gguf|f16"
-  "goedel-prover-v2-8b|Goedel-LM/Goedel-Prover-V2-8B|models/goedel-prover-v2-8b.gguf|q4_k_m"
-  "deepseek-prover-v2-7b|deepseek-ai/DeepSeek-Prover-V2-7B|models/deepseek-prover-v2-7b.gguf|q4_k_m"
-  "kimina-prover-distill-8b|AI-MO/Kimina-Prover-Distill-8B|models/kimina-prover-distill-8b.gguf|q4_k_m"
-  "stp-model-lean|kfdong/STP_model_Lean|models/stp-model-lean.gguf|q4_k_m"
+  "goedel-prover-dpo|Goedel-LM/Goedel-Prover-DPO"
+  "kimina-prover-rl-1.7b|AI-MO/Kimina-Prover-RL-1.7B"
+  "goedel-prover-v2-8b|Goedel-LM/Goedel-Prover-V2-8B"
+  "deepseek-prover-v2-7b|deepseek-ai/DeepSeek-Prover-V2-7B"
+  "kimina-prover-distill-8b|AI-MO/Kimina-Prover-Distill-8B"
+  "stp-model-lean|kfdong/STP_model_Lean"
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -48,67 +49,35 @@ choose() {
 step_prerequisites() {
     section "Checking prerequisites"
     check_cmd rustup
-    check_cmd cmake
     check_cmd cargo
+    check_cmd uv
 
-    # Vulkan: try to detect
-    if pkg-config --exists vulkan 2>/dev/null || dpkg -l libvulkan-dev &>/dev/null || pacman -Q vulkan-headers &>/dev/null 2>&1; then
-        ok "Vulkan headers found"
+    # NVIDIA GPU + CUDA: vLLM needs a CUDA-capable GPU.
+    if command -v nvidia-smi &>/dev/null; then
+        ok "nvidia-smi found ($(nvidia-smi --query-gpu=name --format=csv,noheader | head -1))"
     else
-        warn "Vulkan headers not found — install vulkan-headers / libvulkan-dev for GPU backend"
+        warn "nvidia-smi not found — vLLM requires an NVIDIA GPU with CUDA"
     fi
 }
 
-step_llama_cpp() {
-    section "Setting up llama.cpp"
+step_vllm() {
+    section "Setting up vLLM backend (tools/vllm)"
 
-    if [[ -f tools/llama.cpp/build/bin/llama-server ]]; then
-        ok "llama-server already built"
+    if [[ ! -f "$VLLM_DIR/pyproject.toml" ]]; then
+        fail "$VLLM_DIR/pyproject.toml missing — repo layout unexpected"
+    fi
+
+    if [[ -d "$VLLM_DIR/.venv" ]]; then
+        ok "vLLM venv already present ($VLLM_DIR/.venv)"
         return
     fi
 
-    if [[ -d tools/llama.cpp ]]; then
-        warn "tools/llama.cpp exists but no build — rebuilding"
-        rm -rf tools/llama.cpp
-    fi
-
-    # Check Vulkan SDK version + glslc — need >= 1.3.275 for cooperative matrix features
-    local vulkan_ver
-    vulkan_ver=$(pkg-config --modversion vulkan 2>/dev/null || echo "0")
-    local use_vulkan=OFF
-    if command -v glslc &>/dev/null && [[ "$(printf '%s\n' "1.3.275" "$vulkan_ver" | sort -V | head -1)" = "1.3.275" ]]; then
-        use_vulkan=ON
-        echo "  Vulkan SDK $vulkan_ver + glslc detected — enabling GPU backend"
+    echo "  Provisioning vLLM via uv (this downloads vLLM + CUDA wheels)..."
+    if uv sync --directory "$VLLM_DIR"; then
+        ok "vLLM environment ready at $VLLM_DIR/.venv"
     else
-        if ! command -v glslc &>/dev/null; then
-            warn "glslc not found — install shaderc for GPU acceleration"
-        fi
-        warn "Vulkan SDK $vulkan_ver is too old (need >= 1.3.275). Using CPU backend."
-        warn "Install a newer Vulkan SDK for GPU acceleration:"
-        warn "  https://vulkan.lunarg.com/sdk/home"
+        fail "uv sync failed in $VLLM_DIR — check network and uv install"
     fi
-
-    echo "  Cloning llama.cpp (depth=1)..."
-    git clone --depth 1 "$LLAMA_CPP_REPO" tools/llama.cpp
-
-    # Check CUDA: auto-detect from common install paths
-    local use_cuda=OFF
-    if [[ -d /usr/local/cuda ]] && [[ -x /usr/local/cuda/bin/nvcc ]]; then
-        export PATH="/usr/local/cuda/bin:$PATH"
-        use_cuda=ON
-        echo "  CUDA: $(/usr/local/cuda/bin/nvcc --version | grep release | awk '{print $5,$6}') — enabling GPU backend"
-    elif [[ -d /usr/local/cuda-12.8 ]] && [[ -x /usr/local/cuda-12.8/bin/nvcc ]]; then
-        export PATH="/usr/local/cuda-12.8/bin:$PATH"
-        use_cuda=ON
-        echo "  CUDA 12.8 detected — enabling GPU backend"
-    fi
-
-    echo "  Building with CUDA=$use_cuda Vulkan=OFF backend..."
-    cmake -B tools/llama.cpp/build -S tools/llama.cpp \
-        -DGGML_CUDA="$use_cuda" -DGGML_VULKAN=OFF -DCMAKE_BUILD_TYPE=Release
-    cmake --build tools/llama.cpp/build --config Release -j"$(nproc)"
-
-    ok "llama-server built at tools/llama.cpp/build/bin/llama-server"
 }
 
 step_dataset() {
@@ -132,36 +101,29 @@ step_rust_build() {
 }
 
 step_model_single() {
-    local name="$1" repo="$2" outfile="$3" outtype="$4"
+    local name="$1" repo="$2"
+    local model_dir="data/models/${name}"
 
-    if [[ -f "$outfile" ]]; then
-        ok "$name already exists ($(du -h "$outfile" | cut -f1))"
+    if [[ -f "$model_dir/config.json" ]] && compgen -G "$model_dir/*.safetensors" >/dev/null; then
+        ok "$name already present ($(du -sh "$model_dir" | cut -f1))"
         return
     fi
 
-    echo -e "  ${BOLD}Processing: $name${NC}"
+    echo -e "  ${BOLD}Downloading: $name${NC} (safetensors → $model_dir)"
 
-    # Ensure Python venv (using uv)
-    local VENV_PYTHON="tools/venv/bin/python3"
-    if [[ ! -d tools/venv ]]; then
-        uv venv tools/venv --python 3.10
-        uv pip install --python "$VENV_PYTHON" transformers torch sentencepiece
-    fi
+    export HF_HOME HF_TOKEN HF_ENDPOINT HF_HUB_ENABLE_HF_TRANSFER=1
 
-    export HF_HOME HF_TOKEN HF_ENDPOINT
-    local model_dir="data/models/${name}"
-
-    # Step 1: Download model files (with retry for transient network errors)
-    echo "    Downloading from ${repo}..."
-    export HF_HUB_ENABLE_HF_TRANSFER=0
+    # Download the HF snapshot directly into data/models/<name>/.
+    # vLLM consumes this directory as-is (FP8 quantization happens at load time).
     local attempt=1 max_attempts=5
     while ((attempt <= max_attempts)); do
-        if "$VENV_PYTHON" -c "
+        if uv run --directory "$VLLM_DIR" python -c "
 from huggingface_hub import snapshot_download
-snapshot_download('${repo}', local_dir='${model_dir}', resume_download=True)
+snapshot_download('${repo}', local_dir='${PWD}/${model_dir}', resume_download=True)
 print('Download complete')
 "; then
-            break
+            ok "$name -> $model_dir ($(du -sh "$model_dir" | cut -f1))"
+            return
         fi
         if ((attempt < max_attempts)); then
             local wait=$((2 ** (attempt - 1)))
@@ -173,34 +135,6 @@ print('Download complete')
         fi
         ((attempt++))
     done
-
-    # Step 2: Convert to GGUF (always f16 first; quantize after if needed)
-    echo "    Converting to GGUF (f16)..."
-    mkdir -p "$(dirname "$outfile")"
-    local f16_tmp="models/.tmp-${name}-f16.gguf"
-    if ! "$VENV_PYTHON" tools/llama.cpp/convert_hf_to_gguf.py "$model_dir" \
-        --outfile "$f16_tmp" --outtype f16 2>&1 | tail -3; then
-        warn "$name GGUF conversion failed"
-        rm -f "$f16_tmp"
-        return
-    fi
-
-    # Step 3: Quantize (skip if target is already f16)
-    if [[ "$outtype" == "f16" ]]; then
-        mv "$f16_tmp" "$outfile"
-    else
-        echo "    Quantizing to ${outtype}..."
-        local qtype
-        qtype=$(echo "$outtype" | tr '[:lower:]' '[:upper:]')
-        tools/llama.cpp/build/bin/llama-quantize "$f16_tmp" "$outfile" "$qtype" 2>&1 | tail -3
-        rm -f "$f16_tmp"
-    fi
-
-    if [[ -f "$outfile" ]]; then
-        ok "$name -> $outfile ($(du -h "$outfile" | cut -f1))"
-    else
-        warn "$name GGUF conversion/quantization failed"
-    fi
 }
 
 step_models() {
@@ -221,7 +155,7 @@ step_models() {
         echo "  How do you want to get models?"
         local idx
         idx=$(choose "  " \
-            "SCP from another machine (fastest — copy pre-built GGUF)" \
+            "SCP from another machine (fastest — rsync pre-downloaded safetensors)" \
             "Download + convert from HuggingFace (30-60 min per model)" \
             "Skip — I will handle models myself")
     fi
@@ -231,9 +165,10 @@ step_models() {
             echo ""
             read -r -p "  Source host [user@host]: " src_host
             for entry in "${MODEL_LIST[@]}"; do
-                IFS='|' read -r name repo outfile outtype <<< "$entry"
+                IFS='|' read -r name repo <<< "$entry"
                 echo "  Copying $name..."
-                scp "$src_host:projects/minif2f/$outfile" "$outfile" 2>/dev/null && \
+                mkdir -p "data/models/${name}"
+                rsync -a "$src_host:projects/minif2f/data/models/${name}/" "data/models/${name}/" 2>/dev/null && \
                     ok "$name copied" || warn "$name failed — try download instead"
             done
             ;;
@@ -244,8 +179,8 @@ step_models() {
                 echo ""
                 echo "  Which models to download?"
                 for i in "${!MODEL_LIST[@]}"; do
-                    IFS='|' read -r name repo outfile outtype <<< "${MODEL_LIST[$i]}"
-                    echo -e "    ${BOLD}$((i+1)))${NC} $name ($outtype)"
+                    IFS='|' read -r name repo <<< "${MODEL_LIST[$i]}"
+                    echo -e "    ${BOLD}$((i+1)))${NC} $name"
                 done
                 echo -e "    ${BOLD}a)${NC} All of them"
                 read -r -p "  Choose [1-${#MODEL_LIST[@]}/a]: " model_choice
@@ -253,20 +188,20 @@ step_models() {
 
             if [[ "$model_choice" == "a" ]]; then
                 for entry in "${MODEL_LIST[@]}"; do
-                    IFS='|' read -r name repo outfile outtype <<< "$entry"
-                    step_model_single "$name" "$repo" "$outfile" "$outtype"
+                    IFS='|' read -r name repo <<< "$entry"
+                    step_model_single "$name" "$repo"
                 done
             elif [[ "$model_choice" =~ ^[0-9]+$ ]] && ((model_choice >= 0 && model_choice < ${#MODEL_LIST[@]})); then
-                IFS='|' read -r name repo outfile outtype <<< "${MODEL_LIST[$model_choice]}"
-                step_model_single "$name" "$repo" "$outfile" "$outtype"
+                IFS='|' read -r name repo <<< "${MODEL_LIST[$model_choice]}"
+                step_model_single "$name" "$repo"
             elif [[ "$model_choice" =~ ^[0-9]+$ ]] && ((model_choice >= 1 && model_choice <= ${#MODEL_LIST[@]})); then
                 local i=$((model_choice - 1))
-                IFS='|' read -r name repo outfile outtype <<< "${MODEL_LIST[$i]}"
-                step_model_single "$name" "$repo" "$outfile" "$outtype"
+                IFS='|' read -r name repo <<< "${MODEL_LIST[$i]}"
+                step_model_single "$name" "$repo"
             fi
             ;;
         2)
-            warn "Skipping models — place GGUF files in models/ manually"
+            warn "Skipping models — place safetensors dirs in data/models/<name>/ manually"
             ;;
     esac
 }
@@ -280,7 +215,7 @@ step_done() {
     echo "  ./run          # Interactive menu"
     echo ""
     echo "  # Or directly:"
-    echo "  cargo run --release -- generate -m kimina-prover-rl-1.7b -p models/kimina-1.7b.gguf"
+    echo "  cargo run --release -- generate -m kimina-prover-rl-1.7b -p data/models/kimina-prover-rl-1.7b"
     echo ""
     echo "  # Check status:"
     echo "  cargo run --release -- list-models"
@@ -297,7 +232,7 @@ main() {
     echo -e "${BOLD}╚══════════════════════════════════════╝${NC}"
 
     step_prerequisites
-    step_llama_cpp
+    step_vllm
     step_dataset
     step_rust_build
     step_models
