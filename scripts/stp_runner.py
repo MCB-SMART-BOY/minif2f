@@ -86,17 +86,20 @@ def extract_fenced_code(text: str) -> str | None:
 
 def strip_theorem_header(code: str) -> str:
     """Strip everything before := by, preserving nested have blocks."""
-    if pos := code.find(":= by\n"):
+    pos = code.find(":= by\n")
+    if pos != -1:
         after = code[pos + len(":= by\n") :]
         if is_proof_body(after.strip()):
             return after.strip()
-    if pos := code.find(":= by"):
+    pos = code.find(":= by")
+    if pos != -1:
         after_pos = pos + len(":=")
         rest = code[after_pos:].strip()
         after_by = rest.removeprefix("by").strip()
         if after_by and is_proof_body(after_by):
             return after_by
-    if pos := code.find(":=by"):
+    pos = code.find(":=by")
+    if pos != -1:
         after_by = code[pos + 4 :].strip()
         if after_by and is_proof_body(after_by):
             return after_by
@@ -190,7 +193,8 @@ def extract_proof(raw: str) -> str:
         return code
 
     # Strategy 3: extract tactics from raw text
-    if pos := raw.find(":= by"):
+    pos = raw.find(":= by")
+    if pos != -1:
         after = raw[pos + len(":= by") :]
         lines = after.split("\n")
         start_idx = 0
@@ -333,9 +337,12 @@ def main():
         for batch_start in range(0, args.attempts, args.batch):
             batch_size = min(args.batch, args.attempts - batch_start)
             prompts = [prompt] * batch_size
-            seeds = [1 + batch_start + i for i in range(batch_size)]
 
             inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
+            # Per-batch deterministic seed for reproducibility. The Rust pipeline
+            # uses base_seed.wrapping_add(attempt_index); mirror that here by
+            # seeding from the first attempt index in this batch (seed base = 1).
+            torch.manual_seed(1 + batch_start)
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
@@ -343,7 +350,6 @@ def main():
                     temperature=1.0,
                     top_p=1.0,
                     do_sample=True,
-                    # seed not directly supported in HF generate — use generator
                 )
 
             for i in range(batch_size):
