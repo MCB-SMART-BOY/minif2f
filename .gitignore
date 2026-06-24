@@ -5,10 +5,10 @@
 models/
 
 # Outputs
-output/
+output/old_corrupted
 results/
 reports/
-data/
+data/models
 
 # Tools (set up by setup.sh)
 tools/

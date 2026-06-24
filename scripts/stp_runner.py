@@ -33,6 +33,31 @@ LEAN_OUTPUT = PROJECT_ROOT / "output" / "lean_code" / "stp-model-lean.json"
 CHECKPOINT_FILE = PROJECT_ROOT / "results" / "checkpoints" / "stp-model-lean__stp-hf.json"
 
 
+# ── GPT-2 ByteLevel decoder (matching Rust decode_llama_byte_fallback) ──
+# LlamaTokenizer (slow) does NOT perform ByteLevel decoding — byte-encoded
+# tokens (Ġ=0x20=space, Ċ=0x0A=newline, etc.) remain as their Unicode
+# representations.  This reverses them via the canonical GPT-2
+# bytes_to_unicode inverse table, same as inference.rs: gpt2_unicode_to_byte.
+
+def _build_gpt2_byte_table():
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]; n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b); cs.append(256 + n); n += 1
+    return {chr(c): b for b, c in zip(bs, cs)}
+
+_GPT2_BYTE_TABLE = _build_gpt2_byte_table()
+
+def decode_byte_fallback(text: str) -> str:
+    out = bytearray()
+    for ch in text:
+        if ch in _GPT2_BYTE_TABLE:
+            out.append(_GPT2_BYTE_TABLE[ch])
+        else:
+            out.extend(ch.encode("utf-8"))
+    return out.decode("utf-8", errors="replace")
+
 # ── Prompt building (matching Rust build_deepseek_prover) ──────────
 
 
@@ -283,7 +308,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH), trust_remote_code=True)
     print(f"  Model: {sum(p.numel() for p in model.parameters()):,} params")
     print(f"  Tokenizer: {tokenizer.__class__.__name__}")
-    print(f"  begin_suppress_tokens: {model.config.begin_suppress_tokens}")
+    print(f"  begin_suppress_tokens: {getattr(model.config, 'begin_suppress_tokens', None)}")
 
     # Load theorems
     theorems = []
@@ -364,6 +389,14 @@ def main():
                 raw = raw.replace("<｜end▁of▁sentence｜>", "")
                 raw = raw.replace("<｜begin▁of▁sentence｜>", "")
                 raw = raw.replace("</s>", "")
+                raw = raw.replace("<｜end of sentence｜>", "")  # halfwidth variant
+                while "[PAD]" in raw:
+                    raw = raw.replace("[PAD]", "")
+                # GPT-2 ByteLevel decoder: LlamaTokenizer (slow) does NOT perform
+                # ByteLevel decoding, so byte-encoded tokens (Ġ=space, Ċ=newline,
+                # etc.) remain as Unicode chars.  Apply the same inverse mapping
+                # used in the Rust pipeline (inference.rs: gpt2_unicode_to_byte).
+                raw = decode_byte_fallback(raw)
                 raw_attempts[att_key] = raw
 
                 # Extract proof

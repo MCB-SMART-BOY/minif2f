@@ -32,7 +32,7 @@ Knowledge index: `.claude/MEMORY.md` (three-layer: always-load / on-demand / ref
 # Quality gates (ALL must pass)
 cargo fmt --check          # formatting
 cargo clippy -- -D warnings  # lint (0 warnings)
-cargo test                 # unit tests (36/36)
+cargo test                 # unit tests (73/73)
 
 # Build
 cargo build                # debug
@@ -42,12 +42,15 @@ cargo build --release      # optimized
 cargo run -- list-models
 cargo run -- generate -m <model> -p data/models/<name>               # defaults: -n 128 --parallel 8
 cargo run -- generate -m <model> -p data/models/<name> -n 64 --parallel 12 # custom
+cargo run -- re-extract -m <model>          # re-derive lean_code from raw_output (no GPU)
 cargo run -- status --run-id v1
 
 # Scripts
-./run                       # Interactive menu (8 options)
-./scripts/setup.sh          # One-time deployment
-./scripts/generate-all.sh   # Sequential generation (tmux, 6 models, one at a time)
+./run                       # Interactive menu (9 options, incl. Re-extract)
+./scripts/setup.sh          # One-time deployment (provisions tools/vllm via uv sync)
+./scripts/generate-all.sh   # Sequential generation (tmux, models one at a time)
+./scripts/re-extract.sh <model>  # Offline lean_code recovery (qwen3 only)
+python scripts/stp_runner.py     # STP via HF generate (separate backend)
 ```
 
 ## Architecture
@@ -80,19 +83,19 @@ CLI (clap derive) → EvaluationPipeline::run() (tokio async)
        output/lean_code/<model>.json   — extracted + validated proofs
 ```
 
-## Source Map (9 files, ~650 LOC)
+## Source Map (9 files, ~750 LOC)
 
 | File | Purpose | Tests |
 |------|---------|-------|
-| `main.rs` | CLI: `generate`, `list-models`, `report`, `status` | 0 |
+| `main.rs` | CLI: `generate`, `re-extract`, `list-models`, `report`, `status` | 0 |
 | `lib.rs` | Module declarations | 0 |
 | `config.rs` | `ModelConfig` (serde), `PipelineConfig` | 0 |
 | `models.rs` | 6-model registry with per-model official specs | 6 |
 | `data.rs` | `Theorem` struct, JSONL loader, `make_proof_file()` | 3 |
 | `prompts.rs` | Chat templates + 5 prompt formats + proof extraction + validation | 21 |
-| `inference.rs` | `InferenceEngine`: vLLM server lifecycle, HTTP `/v1/completions` | 0 |
+| `inference.rs` | `InferenceEngine`: vLLM lifecycle, HTTP `/v1/completions`, GPT-2 ByteLevel decoder | 21 |
 | `checkpoint.rs` | Atomic JSON-set crash recovery | 4 |
-| `pipeline.rs` | Continuous request pool → two-layer JSON output | 0 |
+| `pipeline.rs` | Continuous request pool, `assemble_and_validate`, `re_extract_model`, two-layer JSON | 9 |
 
 ## Data Flow
 
@@ -209,6 +212,37 @@ Key functions:
 - `validate_lean_code`: 8-layer validation gate — rejects incomplete/wrong/commentary-only proofs
 - `extract_lean_from_text`: checks `line.starts_with(' ')` (before trim) for indented tactics
 
+## Proof Assembly (`assemble_and_validate`, pipeline.rs)
+
+Single source of truth shared by live generation (`flush_batch`) and offline
+`re-extract` — the two paths never drift. `extract_proof` returns the full
+```lean4 block (with theorem header), so assembly must avoid duplicating it:
+
+1. proof contains `import ` → use as-is (model emitted the whole file)
+2. proof has a `theorem`/`lemma` decl but no import → **prepend header only**
+   (calling `make_proof_file` here would duplicate the statement → rejected
+   double-theorem file; this was the Goedel-V2 / DeepSeek-V2 1.5% bug)
+3. pure proof body → wrap with header + statement via `make_proof_file`
+
+Then `validate_lean_code` gates the result.
+
+## Decoder (`decode_llama_byte_fallback`, inference.rs)
+
+LLaMA-based tokenizers (raw, deepseek_v2) are **GPT-2 ByteLevel BPE**, not
+SentencePiece byte-fallback. Under `--tokenizer-mode slow`, vLLM leaks the
+byte-encoded chars (e.g. `âĦ¤` for `ℤ`). The decoder reverses them with the
+canonical **GPT-2 `bytes_to_unicode` inverse table** (`gpt2_unicode_to_byte`) —
+NOT a flat `cp - 0x100` offset, which mis-decodes 35 continuation bytes and
+shreds multi-byte math symbols. Qwen3 skips the decoder (already correct UTF-8).
+
+## Offline Re-extraction (`re-extract` subcommand)
+
+`cargo run -- re-extract -m <model>` re-runs extraction + `assemble_and_validate`
+over an existing `raw_output/<model>.json`, writing fresh `lean_code/<model>.json`.
+Zero GPU. Use after fixing extraction logic when raw output is intact (qwen3
+models). LLaMA raw is decoder-corrupted at write time and **cannot** be recovered
+this way — those models must be regenerated.
+
 ## Prompt Formats (5 total)
 
 | Format | Used by | Input | `sorry` | Content |
@@ -251,14 +285,20 @@ Checkpoint resume loads existing raw_output + lean_code JSON, merges tuples.
 independently of checkpoint files. Checkpoints only record theorem names — without
 incremental writes, a crash loses all proofs generated since the last complete theorem.
 
+**Ordering invariant** (the data-loss fix): a theorem is marked done in the checkpoint
+ONLY after its data has been written to the output JSON. `flush_batch` no longer
+checkpoints; the run loop buffers flushed theorem names and `mark_done`s them after
+`write_flat_json` succeeds. So the checkpoint can never name a theorem whose data isn't
+durable — worst case on crash is harmless regeneration, never silent data loss.
+
 ## Hardware
 
 - **GPU**: RTX 5090 32GB (CUDA) primary. RTX 4060 8GB (Vulkan) for testing.
 - **Models**: BF16 safetensors → FP8 quantization at load time (~7-8 GB VRAM per 7-8B model)
-- vLLM: `--quantization fp8 --max-num-seqs <n> --gpu-memory-utilization 0.92 --enforce-eager`
+- vLLM: `--quantization fp8 --max-num-seqs <n> --gpu-memory-utilization 0.92 --dtype half --tokenizer-mode slow`
 - vLLM uses **PagedAttention** — KV cache is dynamically managed, more efficient than static slots
 - **FP8 quantization** cuts weight VRAM in half vs BF16, leaving ~24 GB for KV cache
-- **Per-model --max-num-seqs** (see `scripts/generate-all.sh` for current values): 9–38 depending on model VRAM needs
+- **Per-model --max-num-seqs** (see `scripts/generate-all.sh` / `.claude/memory/04-hardware.md`): 16–64 depending on model VRAM + context
 - vLLM's **continuous batching** eliminates idle slot waste — requests are batched dynamically
 
 ## Industrialization Roadmap

@@ -1,5 +1,7 @@
 # minif2f — LLM Theorem Proof Generator
 
+**v2.0.0** — 6 models × 488 theorems × 128 attempts. Provenance-ready output, crash-safe checkpoints, GPT-2 ByteLevel decoder.
+
 Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/miniF2F)'s 488 theorems using 6 Lean 4 theorem-proving LLMs. Output is two flat JSON files per model: raw output + extracted Lean code.
 
 **Stack**: Rust orchestrator + vLLM (Python, managed via `uv` venv) for GPU inference. FP8 quantization for models.
@@ -29,7 +31,8 @@ Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/mini
 5) Check Status
 6) Generate Proofs (single model)
 7) Generate All Models (tmux background, sequential, 128 attempts)
-8) Do It All (setup → quality → build → generate all)
+8) Re-extract lean_code from raw_output (no GPU)
+9) Do It All (setup → quality → build → generate all)
 ```
 
 ## Commands
@@ -38,6 +41,7 @@ Generate 128 proof attempts for each of [miniF2F](https://github.com/openai/mini
 cargo run -- list-models
 cargo run -- generate -m <model> -p data/models/<name>               # defaults: -n 128 --parallel 8
 cargo run -- generate -m <model> -p data/models/<name> -n 64 --parallel 12 # custom
+cargo run -- re-extract -m <model>          # re-derive lean_code from raw_output, no GPU
 cargo run -- status --run-id <id>
 ```
 
@@ -85,11 +89,12 @@ output/
 ```
 ├── run                    # Entry point (interactive menu)
 ├── scripts/
-│   ├── setup.sh           # One-time deployment
-│   ├── generate-all.sh    # Sequential vLLM generation (5 models)
+│   ├── setup.sh           # One-time deployment (provisions tools/vllm via uv sync)
+│   ├── generate-all.sh    # Sequential vLLM generation (tmux, one model at a time)
+│   ├── re-extract.sh      # Offline lean_code recovery from raw_output (no GPU)
 │   └── stp_runner.py      # STP standalone HF generate runner
-├── src/                   # Rust orchestrator (9 files, ~650 LOC)
-│   ├── main.rs            # CLI (clap)
+├── src/                   # Rust orchestrator (9 files, ~750 LOC)
+│   ├── main.rs            # CLI (clap): generate, re-extract, status, list-models
 │   ├── config.rs          # ModelConfig, PipelineConfig
 │   ├── models.rs          # 6-model registry
 │   ├── data.rs            # Dataset + Theorem
@@ -128,8 +133,11 @@ output/
 - **`sorry` placeholder**: Goedel-V2 format includes `sorry` in theorem statement, matching official HF prompt format. Kimina, Simple (Goedel-DPO), and STP formats do NOT include `sorry` — model generates from `:= by`.
 - **Goedel-DPO**: Raw completion prompt with an open ```lean4 block, matching the official Goedel-Prover eval script. Sampling is `temperature=1.0`, `top_p=0.95`, `max_tokens=2048`, seed 1.
 - **Proof extraction**: Multi-strategy with 8-layer validation — `find` (not `rfind`) preserves nested `have ... := by` blocks. `strip_block_comments()` rejects commentary-only proofs. `validate_lean_code()` ensures complete compilable Lean files.
+- **Proof assembly**: `assemble_and_validate` (shared by live generation and `re-extract`) prepends the header only when the extracted block already carries the theorem statement — avoiding the double-theorem file that previously rejected Goedel-V2 / DeepSeek-V2 proofs.
+- **Decoder**: LLaMA-based tokenizers (raw, deepseek_v2) are GPT-2 ByteLevel BPE; `decode_llama_byte_fallback` reverses them with the GPT-2 `bytes_to_unicode` inverse table so multi-byte math symbols (ℤ/ℕ/ℝ) survive. Qwen3 passes through unchanged.
+- **Offline re-extraction**: `re-extract -m <model>` re-derives `lean_code` from existing `raw_output` with zero GPU. Valid for qwen3 models (clean raw); LLaMA raw is decoder-corrupted at write time and must be regenerated.
 - **Checkpoint resume**: Loads existing raw_output + lean_code JSON on startup, merges tuples. Previously-completed theorems are not re-generated.
-- **Incremental writes**: JSON written every 20 theorems — crash resilience independent of checkpoint system.
+- **Incremental writes**: JSON written every 20 theorems. Checkpoint marks a theorem done only AFTER its data is written to disk — the checkpoint never gets ahead of durable output, so a crash causes harmless regeneration, never silent data loss.
 - **Two-layer output**: `output/raw_output/` (unfiltered) + `output/lean_code/` (extracted + validated). Same flat JSON format in both.
 - **STP model**: Uses standalone `scripts/stp_runner.py` with HF `model.generate()` (BF16 native). vLLM does not support `begin_suppress_tokens` required by this model, causing 100% empty output when attempted. See `workflows/stp.md`.
 - **Byte-fallback decoder**: Architecture-conditional — only applied to LLaMA tokenizer models (DPO, DeepSeek, STP). Qwen3 models pass through unchanged. See [[06-decisions]].
@@ -149,19 +157,19 @@ output/
 See `CLAUDE.md` > Industrialization Roadmap and `ARCHITECTURE.md` > Future Architecture for full design.
 - **128 attempts**: Default. Configurable via `-n`. Used for Pass@k evaluation.
 - **Sequential generation**: `generate-all.sh` runs all configured models one at a time on port 8080 with per-model `--parallel` values. Single tmux session.
-- **GPU**: RTX 5090 32GB CUDA. KV cache q8_0 shared paged pool — `--parallel` does NOT linearly multiply VRAM.
+- **GPU**: RTX 5090 32GB CUDA. vLLM PagedAttention KV cache, shared paged pool — `--parallel` does NOT linearly multiply VRAM.
 - **Crash recovery**: `results/checkpoints/<model>__<run_id>.json` — resume with `--run-id`
 
 ## Hardware
 
 - **GPU**: RTX 5090 32GB (CUDA) primary. RTX 4060 8GB (Vulkan) for testing.
 - **BF16 safetensors → FP8 quantized at load time**: ~7-8 GB VRAM per 7-8B model
-- **KV cache**: q8_0 quantization, shared paged pool — `--parallel` does NOT linearly multiply VRAM
+- **KV cache**: vLLM PagedAttention, shared paged pool — `--parallel` does NOT linearly multiply VRAM
 
 ## Quality
 
 ```bash
 cargo fmt --check          ✅
 cargo clippy -- -D warnings  ✅
-cargo test                 ✅ 36/36
+cargo test                 ✅ 73/73
 ```

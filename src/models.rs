@@ -66,6 +66,10 @@ pub fn builtin_models() -> Vec<ModelConfig> {
         //    Prompt: proof plan + ```lean4 block with sorry placeholder
         //    Chat: user message only — NO system prompt
         //    EOS=151645 (<|im_end|>)
+        //    max_model_len kept at the HF 40960 (official). At parallel=16 the
+        //    KV cache would be ~40 GB → preemption. Mitigated by running at
+        //    parallel=8 (~20 GB KV, fits RTX 5090). max_tokens stays at the
+        //    official 32768; vLLM validates max_tokens ≤ max_model_len.
         ModelConfig {
             name: "goedel-prover-v2-8b".into(),
             hf_repo: "Goedel-LM/Goedel-Prover-V2-8B".into(),
@@ -184,6 +188,7 @@ mod tests {
 
     #[test]
     fn test_official_context_limits() {
+        // goedel-v2 uses the official HF 40960; VRAM controlled via parallel=8
         assert_eq!(
             find_model("goedel-prover-v2-8b").unwrap().max_model_len,
             40960

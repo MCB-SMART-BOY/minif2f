@@ -12,19 +12,19 @@
 
 ---
 
-## File Map (9 files, ~650 LOC)
+## File Map (9 files, ~3200 LOC incl. tests)
 
 | File | LOC | Role |
 |------|-----|------|
-| `main.rs` | 128 | CLI entry point (clap derive) |
+| `main.rs` | 168 | CLI entry point (clap derive): generate, re-extract, status, list-models |
 | `lib.rs` | 7 | Module declarations |
-| `config.rs` | 72 | `ModelConfig` + `PipelineConfig` structs |
-| `models.rs` | 222 | 6-model registry with per-model specs |
-| `data.rs` | 158 | `Theorem` struct, JSONL loader, `make_proof_file()` |
-| `prompts.rs` | 910 | Chat templates + 5 prompt formats + proof extraction + validation |
-| `inference.rs` | 289 | `InferenceEngine`: vLLM server lifecycle, HTTP `/v1/completions` |
-| `checkpoint.rs` | 140 | Atomic JSON-set crash recovery |
-| `pipeline.rs` | 428 | Continuous request pool → two-layer JSON output |
+| `config.rs` | 60 | `ModelConfig` + `PipelineConfig` structs |
+| `models.rs` | 265 | 6-model registry with per-model specs |
+| `data.rs` | 167 | `Theorem` struct, JSONL loader, `make_proof_file()` |
+| `prompts.rs` | 1127 | Chat templates + 5 prompt formats + proof extraction + validation |
+| `inference.rs` | 474 | `InferenceEngine`: vLLM lifecycle, HTTP `/v1/completions`, GPT-2 ByteLevel decoder |
+| `checkpoint.rs` | 139 | Atomic JSON-set crash recovery |
+| `pipeline.rs` | 786 | Continuous pool, `assemble_and_validate`, `re_extract_model`, two-layer JSON |
 
 ---
 
@@ -371,7 +371,12 @@ Stderr is redirected to `/tmp/vllm-server-{port}.log`.
 
 - Sends OpenAI-compatible JSON body: `{"prompt", "max_tokens", "temperature", "top_p", "seed", "stop"}`
 - Extracts `json["choices"][0]["text"]` as string
-- Runs through `decode_llama_byte_fallback()` to fix LLaMA tokenizer byte-fallback encoding
+- For LLaMA-based architectures (raw, deepseek_v2, deepseek_coder), runs through
+  `decode_llama_byte_fallback()` — these tokenizers are GPT-2 ByteLevel BPE and, under
+  `--tokenizer-mode slow`, leak byte-encoded chars (e.g. `âĦ¤` for `ℤ`). The decoder
+  reverses them via the GPT-2 `bytes_to_unicode` inverse table (`gpt2_unicode_to_byte`),
+  NOT a flat `cp - 0x100` offset (which mis-decodes 35 continuation bytes). Qwen3 skips
+  the decoder (already valid UTF-8).
 - Retries on HTTP errors and JSON parse errors (up to `max_retries` times)
 - Backoff: 1s, 2s, 4s...
 - Returns `""` on final failure (graceful degradation)
@@ -478,23 +483,28 @@ Since `buffer_unordered` interleaves results from different theorems, a `BTreeMa
 When a theorem's batch is complete:
 
 1. **Parallel extraction** (rayon): `batch.par_iter().map(|(attempt, text)| { ... })`
-   - `PromptBuilder::extract_proof(text)` → proof body
-   - If proof body is empty → lean = `""`
-   - If proof body contains `import ` → use as-is (model generated complete file)
-   - Otherwise → `Theorem::make_proof_file(proof_body)` → assemble full Lean code
-   - **Validate**: `PromptBuilder::validate_lean_code(lean)` — reject empty/incomplete/wrong proofs
+   - `PromptBuilder::extract_proof(text)` → proof (the full ```lean4 block)
+   - `assemble_and_validate(proof, theorem, pb)` — three branches:
+     - empty proof → `""`
+     - proof contains `import ` → use as-is (model emitted complete file)
+     - proof has `theorem`/`lemma` decl but no import → **prepend header only**
+       (calling `make_proof_file` would duplicate the statement → rejected double-theorem)
+     - pure proof body → `Theorem::make_proof_file(proof)`
+   - then `validate_lean_code(lean)` — reject empty/incomplete/wrong proofs
    - Returns `(attempt_index, raw_text, lean_code)`
 
 2. **Sequential insertion**: Results go into `BTreeMap` (not `Sync`, so done sequentially after parallel extraction)
 
 3. **Progress bar**: `bar.inc(1)` per attempt
 
-4. **Checkpoint**: `CheckpointManager::mark_done(theorem_name)` (spawned as blocking task to avoid blocking async runtime)
-
-5. **Incremental JSON write**: Every 20 theorems, write both JSON files to disk (crash resilience)
+4. **Incremental JSON write**: Every 20 theorems, write both JSON files to disk, THEN
+   `mark_done` the just-written theorems. The checkpoint never gets ahead of durable
+   data — a crash causes harmless regeneration, never silent loss. `flush_batch` itself
+   no longer checkpoints.
 
 #### Phase 5: Final Write + Shutdown
-- Write final JSON files (catches any theorems after the last incremental write)
+- Write final JSON files (catches any theorems after the last incremental write), then
+  `mark_done` the remaining buffered theorems
 - `engine.stop()` → kill vLLM, free GPU
 - Print summary: theorem count, file sizes
 
@@ -502,12 +512,22 @@ When a theorem's batch is complete:
 
 ### Key Functions in `pipeline.rs`
 
-#### `flush_batch(results, theorem, batch, pb, checkpoint_dir, model_name, run_id, bar)`
-**Parallel batch extraction via rayon, then sequential BTreeMap insert.**
+#### `flush_batch(results, theorem, batch, pb, bar)`
+**Parallel batch extraction via rayon, then sequential BTreeMap insert.** Does NOT
+checkpoint — the run loop marks theorems done only after their data is on disk.
 1. `rayon::par_iter()` — splits one theorem's attempts across CPU cores
-2. For each attempt: extract proof → assemble Lean → validate → (attempt_index, raw, lean)
+2. For each attempt: `extract_proof` → `assemble_and_validate` → (attempt_index, raw, lean)
 3. Sequential insertion into `ResultsMap`
-4. Spawns `tokio::task::spawn_blocking` for checkpoint write
+
+#### `assemble_and_validate(proof, theorem, pb)` → `String`
+Single source of truth for proof assembly, shared by `flush_batch` and `re_extract_model`
+so the live and offline paths never drift. Three-branch logic (above) + `validate_lean_code`.
+
+#### `re_extract_model(model_cfg, raw_dir, lean_dir, data_dir)` → `Result<(usize, usize)>`
+Re-derives `lean_code` from an existing `raw_output/<model>.json` with no inference.
+Reads stored (already-decoded) raw, re-runs `extract_proof` + `assemble_and_validate`,
+writes fresh `lean_code`. Backs the `re-extract` CLI subcommand. Valid for qwen3 models;
+LLaMA raw is decoder-corrupted at write time and cannot be recovered this way.
 
 #### `write_flat_json(path, model_cfg, results, pick)` → `Result<()>`
 Writes a flat JSON file with the structure:
@@ -696,7 +716,7 @@ per_slot = (max_tokens + 4096).min(max_model_len)
 - `max_tokens + 4096`: output budget plus prompt/reasoning headroom per slot
 - `.min(max_model_len)`: capped at the model's official context limit
 - vLLM PagedAttention: KV cache is dynamically managed across sequences
-- q8_0 KV cache + shared paged pool makes large ctx-sizes viable (VRAM grows ~65KB/token for 8B, ~49KB/token for 1.7B)
+- vLLM PagedAttention KV cache + shared paged pool makes large ctx-sizes viable (VRAM grows ~65KB/token for 8B, ~49KB/token for 1.7B)
 
 Per-slot context:
 | Model | max_tok | max_model_len | per_slot |
@@ -714,11 +734,15 @@ Per-slot context:
 
 - Checkpoint file: `results/checkpoints/<model>__<run_id>.json` — a JSON array of theorem names
 - **Atomic write**: temp file → rename (Unix atomic)
-- **Trigger**: per-theorem (when all configured attempts complete)
 - **Resume**: `--run-id <run_id>` → loads checkpoint, skips completed theorems
-- **Incremental JSON write**: every 20 theorems, both output JSONs are written to disk (independent of checkpoint)
+- **Incremental JSON write**: every 20 theorems, both output JSONs are written to disk
   - Checkpoint only records theorem names, not proof data
-  - Without incremental writes, a crash loses all generated proofs for theorems since the last JSON write
+- **Ordering invariant**: a theorem is marked done ONLY after its data has been written to
+  the output JSON. `flush_batch` no longer checkpoints; the run loop buffers flushed theorem
+  names and `mark_done`s them after `write_flat_json` succeeds. The checkpoint can never name
+  a theorem whose data isn't durable — a crash causes harmless regeneration, never silent
+  data loss. (Previously checkpoint ran per-theorem while JSON wrote every 20, so a crash
+  could skip up to 19 theorems whose data never reached disk.)
 
 ---
 
@@ -727,7 +751,7 @@ Per-slot context:
 ```bash
 cargo fmt --check          # formatting verification
 cargo clippy -- -D warnings  # lint (0 warnings required)
-cargo test                 # unit tests (~35 tests)
+cargo test                 # unit tests (73 tests)
 cargo build --release      # optimized build
 ```
 
@@ -787,8 +811,10 @@ pipeline.rs
 7. **Chat template prepopulation** — DeepSeek Coder gets `### Response:\n```lean4\n{code}` to keep it in code-generation mode
 8. **Conditional system prompt** — Qwen3 template omits system block when `system_prompt` is empty (Goedel-V2 official behavior)
 9. **No BOS in template** — vLLM/tokenizer adds it automatically, prevents double BOS
-10. **Architecture-conditional decoder** — byte-fallback only applied to LLaMA tokenizer models (raw, deepseek_v2), Qwen3 passes through
-11. **Incremental JSON writes** — every 20 theorems, write both JSONs to disk
+10. **GPT-2 ByteLevel decoder** — LLaMA-based tokenizers (raw, deepseek_v2) are GPT-2 ByteLevel BPE; `decode_llama_byte_fallback` reverses leaked byte-encoding via the GPT-2 `bytes_to_unicode` inverse table (not a flat `cp - 0x100`), preserving multi-byte math symbols. Qwen3 passes through.
+11. **Shared `assemble_and_validate`** — one assembly function for live generation and offline `re-extract`; prepends header only when the extracted block already carries the theorem statement, avoiding double-theorem files.
+12. **Checkpoint after durable write** — theorems are marked done only after their data reaches the output JSON, so the checkpoint never gets ahead of disk and a crash never causes silent data loss.
+13. **Offline re-extraction** — `re-extract` subcommand re-derives lean_code from raw_output with zero GPU (qwen3 only; LLaMA raw is decoder-corrupted at write time).
 
 ---
 
